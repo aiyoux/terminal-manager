@@ -1,1 +1,12 @@
 @import 'tailwindcss';
+
+@layer base {
+  /* Lock to the small viewport height so Chrome mobile keeps the URL bar
+     stable (visible) instead of toggling it on scroll. Full-screen app shell. */
+  html,
+  body {
+    height: 100svh;
+    overflow: hidden;
+    overscroll-behavior: none;
+  }
+}

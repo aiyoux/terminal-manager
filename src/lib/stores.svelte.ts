@@ -32,11 +32,19 @@ export interface Project {
   collapsed: boolean;
 }
 
+export interface ProjectGroup {
+  id: string;
+  name: string;
+  projects: Project[];
+  collapsed: boolean;
+}
+
 export interface Connection {
   id: string;
   name: string;
   wsUrl: string;
   projects: Project[];
+  projectGroups?: ProjectGroup[];
   collapsed: boolean;
 }
 
@@ -94,8 +102,16 @@ if (typeof window !== 'undefined') {
     if (connData) {
       // Run migration
       for (const conn of connData) {
+        conn.projects = conn.projects || [];
+        conn.projectGroups = conn.projectGroups || [];
         for (const proj of conn.projects) {
           proj.terminals = proj.terminals.map(migrateTerminal);
+        }
+        for (const pg of conn.projectGroups) {
+          pg.projects = pg.projects || [];
+          for (const proj of pg.projects) {
+            proj.terminals = proj.terminals.map(migrateTerminal);
+          }
         }
       }
       connections = connData;
@@ -140,10 +156,20 @@ export function importState(json: string): boolean {
 
     // Basic validation and migration
     for (const conn of conns) {
-      if (!conn.id || !conn.name || !Array.isArray(conn.projects)) return false;
+      if (!conn.id || !conn.name) return false;
+      conn.projects = conn.projects || [];
+      conn.projectGroups = conn.projectGroups || [];
+      if (!Array.isArray(conn.projects) || !Array.isArray(conn.projectGroups)) return false;
       for (const proj of conn.projects) {
         if (!proj.id || !proj.name || !Array.isArray(proj.terminals)) return false;
         proj.terminals = proj.terminals.map(migrateTerminal);
+      }
+      for (const pg of conn.projectGroups) {
+        if (!pg.id || !pg.name || !Array.isArray(pg.projects)) return false;
+        for (const proj of pg.projects) {
+          if (!proj.id || !proj.name || !Array.isArray(proj.terminals)) return false;
+          proj.terminals = proj.terminals.map(migrateTerminal);
+        }
       }
     }
 
@@ -308,7 +334,7 @@ export function toggleConnectionCollapse(connId: string) {
 
 // --- Project CRUD ---
 
-export function addProject(connId: string, name: string): Project | null {
+export function addProject(connId: string, name: string, groupId?: string): Project | null {
   const conn = connections.find(c => c.id === connId);
   if (!conn) return null;
 
@@ -318,16 +344,34 @@ export function addProject(connId: string, name: string): Project | null {
     terminals: [],
     collapsed: false
   };
+
+  if (groupId) {
+    if (!conn.projectGroups) conn.projectGroups = [];
+    const group = conn.projectGroups.find(g => g.id === groupId);
+    if (group) {
+      group.projects.push(project);
+      save();
+      return project;
+    }
+  }
+
   conn.projects.push(project);
   save();
   return project;
 }
 
 export function removeProject(connId: string, projectId: string) {
-  const conn = connections.find(c => c.id === connId);
-  if (!conn) return;
-  const idx = conn.projects.findIndex(p => p.id === projectId);
-  if (idx > -1) conn.projects.splice(idx, 1);
+  const found = findProjectById(projectId);
+  if (!found) return;
+
+  const { conn, group } = found;
+  if (group) {
+    const idx = group.projects.findIndex(p => p.id === projectId);
+    if (idx > -1) group.projects.splice(idx, 1);
+  } else {
+    const idx = conn.projects.findIndex(p => p.id === projectId);
+    if (idx > -1) conn.projects.splice(idx, 1);
+  }
 
   if (!findTerminalById(activeTerminalId)) {
     activeTerminalId = '';
@@ -336,18 +380,18 @@ export function removeProject(connId: string, projectId: string) {
 }
 
 export function toggleProjectCollapse(connId: string, projectId: string) {
-  const conn = connections.find(c => c.id === connId);
-  const project = conn?.projects.find(p => p.id === projectId);
-  if (project) project.collapsed = !project.collapsed;
-  save();
+  const found = findProjectById(projectId);
+  if (found) {
+    found.project.collapsed = !found.project.collapsed;
+    save();
+  }
 }
 
 // --- Terminal CRUD ---
 
 export function addTerminal(connId: string, projectId: string, name: string): TerminalTab | null {
-  const conn = connections.find(c => c.id === connId);
-  const project = conn?.projects.find(p => p.id === projectId);
-  if (!project) return null;
+  const found = findProjectById(projectId);
+  if (!found) return null;
 
   const id = uid();
   const terminal: TerminalTab = {
@@ -359,19 +403,18 @@ export function addTerminal(connId: string, projectId: string, name: string): Te
     savedCommands: [],
     collapsed: true,
   };
-  project.terminals.push(terminal);
+  found.project.terminals.push(terminal);
   activeTerminalId = terminal.id;
   save();
   return terminal;
 }
 
 export function removeTerminal(connId: string, projectId: string, terminalId: string) {
-  const conn = connections.find(c => c.id === connId);
-  const project = conn?.projects.find(p => p.id === projectId);
-  if (!project) return;
+  const found = findTerminalById(terminalId);
+  if (!found) return;
 
-  const idx = project.terminals.findIndex(t => t.id === terminalId);
-  if (idx > -1) project.terminals.splice(idx, 1);
+  const idx = found.project.terminals.findIndex(t => t.id === terminalId);
+  if (idx > -1) found.project.terminals.splice(idx, 1);
 
   if (activeTerminalId === terminalId) {
     activeTerminalId = '';
@@ -380,42 +423,43 @@ export function removeTerminal(connId: string, projectId: string, terminalId: st
 }
 
 export function renameProject(connId: string, projectId: string, name: string) {
-  const conn = connections.find(c => c.id === connId);
-  const project = conn?.projects.find(p => p.id === projectId);
-  if (project) project.name = name;
-  save();
+  const found = findProjectById(projectId);
+  if (found) {
+    found.project.name = name;
+    save();
+  }
 }
 
 export function renameTerminal(connId: string, projectId: string, terminalId: string, name: string) {
-  const conn = connections.find(c => c.id === connId);
-  const project = conn?.projects.find(p => p.id === projectId);
-  const terminal = project?.terminals.find(t => t.id === terminalId);
-  if (terminal) terminal.name = name;
-  save();
+  const found = findTerminalById(terminalId);
+  if (found) {
+    found.terminal.name = name;
+    save();
+  }
 }
 
 export function toggleTerminalCollapse(connId: string, projectId: string, terminalId: string) {
-  const conn = connections.find(c => c.id === connId);
-  const project = conn?.projects.find(p => p.id === projectId);
-  const terminal = project?.terminals.find(t => t.id === terminalId);
-  if (terminal) terminal.collapsed = !terminal.collapsed;
-  save();
+  const found = findTerminalById(terminalId);
+  if (found) {
+    found.terminal.collapsed = !found.terminal.collapsed;
+    save();
+  }
 }
 
 export function toggleTerminalPinned(connId: string, projectId: string, terminalId: string) {
-  const conn = connections.find(c => c.id === connId);
-  const project = conn?.projects.find(p => p.id === projectId);
-  const terminal = project?.terminals.find(t => t.id === terminalId);
-  if (terminal) terminal.pinned = !terminal.pinned;
-  save();
+  const found = findTerminalById(terminalId);
+  if (found) {
+    found.terminal.pinned = !found.terminal.pinned;
+    save();
+  }
 }
 
 export function toggleTerminalGridHidden(connId: string, projectId: string, terminalId: string) {
-  const conn = connections.find(c => c.id === connId);
-  const project = conn?.projects.find(p => p.id === projectId);
-  const terminal = project?.terminals.find(t => t.id === terminalId);
-  if (terminal) terminal.gridHidden = !terminal.gridHidden;
-  save();
+  const found = findTerminalById(terminalId);
+  if (found) {
+    found.terminal.gridHidden = !found.terminal.gridHidden;
+    save();
+  }
 }
 
 export function getGridSettings(): GridSettings {
@@ -428,19 +472,17 @@ export function setGridLayout(columns: number, rows: number) {
 }
 
 export function updateTerminalFontSize(connId: string, projectId: string, terminalId: string, fontSize: number) {
-  const conn = connections.find(c => c.id === connId);
-  const project = conn?.projects.find(p => p.id === projectId);
-  const terminal = project?.terminals.find(t => t.id === terminalId);
-  if (terminal) terminal.fontSize = fontSize;
-  save();
+  const terminal = findTerminalById(terminalId)?.terminal;
+  if (terminal) {
+    terminal.fontSize = fontSize;
+    save();
+  }
 }
 
 // --- Saved Command CRUD ---
 
 export function addSavedCommand(connId: string, projectId: string, terminalId: string, label: string, command: string, autoExecute: boolean = true, sendCtrlCBefore: boolean = false): SavedCommand | null {
-  const conn = connections.find(c => c.id === connId);
-  const project = conn?.projects.find(p => p.id === projectId);
-  const terminal = project?.terminals.find(t => t.id === terminalId);
+  const terminal = findTerminalById(terminalId)?.terminal;
   if (!terminal) return null;
 
   const cmd: SavedCommand = {
@@ -457,9 +499,7 @@ export function addSavedCommand(connId: string, projectId: string, terminalId: s
 }
 
 export function removeSavedCommand(connId: string, projectId: string, terminalId: string, cmdId: string) {
-  const conn = connections.find(c => c.id === connId);
-  const project = conn?.projects.find(p => p.id === projectId);
-  const terminal = project?.terminals.find(t => t.id === terminalId);
+  const terminal = findTerminalById(terminalId)?.terminal;
   if (!terminal) return;
 
   const idx = terminal.savedCommands.findIndex(c => c.id === cmdId);
@@ -468,9 +508,7 @@ export function removeSavedCommand(connId: string, projectId: string, terminalId
 }
 
 export function updateSavedCommand(connId: string, projectId: string, terminalId: string, cmdId: string, newLabel: string, newCommand: string, autoExecute?: boolean, sendCtrlCBefore?: boolean) {
-  const conn = connections.find(c => c.id === connId);
-  const project = conn?.projects.find(p => p.id === projectId);
-  const terminal = project?.terminals.find(t => t.id === terminalId);
+  const terminal = findTerminalById(terminalId)?.terminal;
   if (!terminal) return;
 
   const cmd = terminal.savedCommands.find(c => c.id === cmdId);
@@ -484,9 +522,7 @@ export function updateSavedCommand(connId: string, projectId: string, terminalId
 }
 
 export function toggleCommandAutoExecute(connId: string, projectId: string, terminalId: string, cmdId: string) {
-  const conn = connections.find(c => c.id === connId);
-  const project = conn?.projects.find(p => p.id === projectId);
-  const terminal = project?.terminals.find(t => t.id === terminalId);
+  const terminal = findTerminalById(terminalId)?.terminal;
   if (!terminal) return;
 
   const cmd = terminal.savedCommands.find(c => c.id === cmdId);
@@ -497,9 +533,7 @@ export function toggleCommandAutoExecute(connId: string, projectId: string, term
 }
 
 export function toggleCommandCtrlCBefore(connId: string, projectId: string, terminalId: string, cmdId: string) {
-  const conn = connections.find(c => c.id === connId);
-  const project = conn?.projects.find(p => p.id === projectId);
-  const terminal = project?.terminals.find(t => t.id === terminalId);
+  const terminal = findTerminalById(terminalId)?.terminal;
   if (!terminal) return;
 
   const cmd = terminal.savedCommands.find(c => c.id === cmdId);
@@ -510,14 +544,14 @@ export function toggleCommandCtrlCBefore(connId: string, projectId: string, term
 }
 
 export function toggleCommandOnConnect(connId: string, projectId: string, terminalId: string, cmdId: string) {
-  const conn = connections.find(c => c.id === connId);
-  const project = conn?.projects.find(p => p.id === projectId);
-  const terminal = project?.terminals.find(t => t.id === terminalId);
+  const terminal = findTerminalById(terminalId)?.terminal;
   if (!terminal) return;
 
   const cmd = terminal.savedCommands.find(c => c.id === cmdId);
-  if (cmd) cmd.isOnConnect = !cmd.isOnConnect;
-  save();
+  if (cmd) {
+    cmd.isOnConnect = !cmd.isOnConnect;
+    save();
+  }
 }
 
 export function getOnConnectCommands(terminalId: string): string[] {
@@ -530,22 +564,146 @@ export function getOnConnectCommands(terminalId: string): string[] {
 
 // Legacy compat
 export function updateTerminalConfig(connId: string, projectId: string, terminalId: string, config: { name?: string; workingDir?: string; startupCommand?: string }) {
-  const conn = connections.find(c => c.id === connId);
-  const project = conn?.projects.find(p => p.id === projectId);
-  const terminal = project?.terminals.find(t => t.id === terminalId);
+  const terminal = findTerminalById(terminalId)?.terminal;
   if (!terminal) return;
   if (config.name !== undefined) terminal.name = config.name;
   if (config.workingDir !== undefined) terminal.workingDir = config.workingDir;
   save();
 }
 
-// --- Helpers ---
+// --- Project Group CRUD ---
+
+export function addProjectGroup(connId: string, name: string): ProjectGroup | null {
+  const conn = connections.find(c => c.id === connId);
+  if (!conn) return null;
+
+  if (!conn.projectGroups) conn.projectGroups = [];
+
+  const group: ProjectGroup = {
+    id: uid(),
+    name,
+    projects: [],
+    collapsed: false
+  };
+  conn.projectGroups.push(group);
+  save();
+  return group;
+}
+
+export function removeProjectGroup(connId: string, groupId: string) {
+  const conn = connections.find(c => c.id === connId);
+  if (!conn || !conn.projectGroups) return;
+
+  conn.projectGroups = conn.projectGroups.filter(g => g.id !== groupId);
+
+  if (!findTerminalById(activeTerminalId)) {
+    activeTerminalId = '';
+  }
+  save();
+}
+
+export function renameProjectGroup(connId: string, groupId: string, name: string) {
+  const conn = connections.find(c => c.id === connId);
+  const group = conn?.projectGroups?.find(g => g.id === groupId);
+  if (group) {
+    group.name = name;
+    save();
+  }
+}
+
+export function toggleProjectGroupCollapse(connId: string, groupId: string) {
+  const conn = connections.find(c => c.id === connId);
+  const group = conn?.projectGroups?.find(g => g.id === groupId);
+  if (group) {
+    group.collapsed = !group.collapsed;
+    save();
+  }
+}
+
+export function reorderProjectGroups(connId: string, fromIndex: number, toIndex: number) {
+  const conn = connections.find(c => c.id === connId);
+  if (conn && conn.projectGroups) {
+    moveItem(conn.projectGroups, fromIndex, toIndex);
+    save();
+  }
+}
+
+export function moveProject(
+  projectId: string,
+  targetConnId: string,
+  targetGroupId: string | null, // null means ungrouped
+  toIndex: number
+) {
+  const found = findProjectById(projectId);
+  if (!found) return;
+
+  const { conn: srcConn, group: srcGroup, project } = found;
+
+  // Remove from source list
+  if (srcGroup) {
+    const idx = srcGroup.projects.findIndex(p => p.id === projectId);
+    if (idx > -1) srcGroup.projects.splice(idx, 1);
+  } else {
+    const idx = srcConn.projects.findIndex(p => p.id === projectId);
+    if (idx > -1) srcConn.projects.splice(idx, 1);
+  }
+
+  // Insert into target list
+  const destConn = connections.find(c => c.id === targetConnId);
+  if (!destConn) {
+    // Revert/restore to source if destination not found
+    if (srcGroup) {
+      srcGroup.projects.push(project);
+    } else {
+      srcConn.projects.push(project);
+    }
+    return;
+  }
+
+  if (targetGroupId) {
+    if (!destConn.projectGroups) destConn.projectGroups = [];
+    const destGroup = destConn.projectGroups.find(g => g.id === targetGroupId);
+    if (destGroup) {
+      const idx = Math.max(0, Math.min(toIndex, destGroup.projects.length));
+      destGroup.projects.splice(idx, 0, project);
+    } else {
+      destConn.projects.push(project);
+    }
+  } else {
+    const idx = Math.max(0, Math.min(toIndex, destConn.projects.length));
+    destConn.projects.splice(idx, 0, project);
+  }
+
+  save();
+}
+
+export function findProjectById(projectId: string): { conn: Connection; group: ProjectGroup | null; project: Project } | null {
+  for (const conn of connections) {
+    const project = conn.projects.find(p => p.id === projectId);
+    if (project) return { conn, group: null, project };
+    if (conn.projectGroups) {
+      for (const group of conn.projectGroups) {
+        const p = group.projects.find(proj => proj.id === projectId);
+        if (p) return { conn, group, project: p };
+      }
+    }
+  }
+  return null;
+}
 
 export function findTerminalById(terminalId: string): { conn: Connection; project: Project; terminal: TerminalTab } | null {
   for (const conn of connections) {
     for (const project of conn.projects) {
       const terminal = project.terminals.find(t => t.id === terminalId);
       if (terminal) return { conn, project, terminal };
+    }
+    if (conn.projectGroups) {
+      for (const group of conn.projectGroups) {
+        for (const project of group.projects) {
+          const terminal = project.terminals.find(t => t.id === terminalId);
+          if (terminal) return { conn, project, terminal };
+        }
+      }
     }
   }
   return null;
