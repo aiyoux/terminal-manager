@@ -64,6 +64,8 @@ function stripDAResponses(payload: Uint8Array, decoder: TextDecoder, encoder: Te
   return encoder.encode(text);
 }
 
+export const connectionStatuses = $state<Record<string, boolean>>({});
+
 /**
  * Get or create a WebSocket connection for a terminal.
  * If already connected, returns the existing connection.
@@ -75,11 +77,14 @@ export function getOrCreateConnection(
   workingDir: string = '',
   cols: number = 80,
   rows: number = 24,
+  initialCallbacks?: Set<DataCallback>
 ): ManagedConnection {
   const existing = connections.get(terminalId);
   if (existing && existing.ws.readyState <= WebSocket.OPEN) {
     return existing;
   }
+
+  const savedCallbacks = initialCallbacks || (existing ? existing.callbacks : new Set<DataCallback>());
 
   // Clean up any stale connection before creating a new one
   if (existing) {
@@ -96,7 +101,7 @@ export function getOrCreateConnection(
     tmuxSession,
     workingDir,
     buffer: [],
-    callbacks: new Set(),
+    callbacks: savedCallbacks,
     cols,
     rows,
     connected: false,
@@ -117,6 +122,7 @@ export function getOrCreateConnection(
 
   ws.onopen = () => {
     conn.connected = true;
+    connectionStatuses[terminalId] = true;
 
     // ttyd init handshake
     const initMsg = JSON.stringify({ AuthToken: '', columns: conn.cols, rows: conn.rows });
@@ -177,15 +183,53 @@ export function getOrCreateConnection(
 
   ws.onclose = () => {
     conn.connected = false;
+    connectionStatuses[terminalId] = false;
     clearTimeout(daFilterTimer);
   };
 
   ws.onerror = () => {
     conn.connected = false;
+    connectionStatuses[terminalId] = false;
   };
 
   connections.set(terminalId, conn);
   return conn;
+}
+
+/**
+ * Force reconnect a terminal's connection.
+ */
+export function reconnectConnection(
+  terminalId: string,
+  wsUrl?: string,
+  tmuxSession?: string,
+  workingDir?: string
+): ManagedConnection | null {
+  const existing = connections.get(terminalId);
+  const targetWsUrl = wsUrl || existing?.wsUrl;
+  if (!targetWsUrl) return null;
+
+  const targetTmuxSession = tmuxSession ?? existing?.tmuxSession ?? '';
+  const targetWorkingDir = workingDir ?? existing?.workingDir ?? '';
+  const cols = existing?.cols ?? 80;
+  const rows = existing?.rows ?? 24;
+
+  const savedCallbacks = existing ? existing.callbacks : new Set<DataCallback>();
+
+  if (existing) {
+    try { existing.ws.close(); } catch (_) {}
+    connections.delete(terminalId);
+  }
+
+  return getOrCreateConnection(
+    terminalId,
+    targetWsUrl,
+    targetTmuxSession,
+    targetWorkingDir,
+    cols,
+    rows,
+    savedCallbacks
+  );
 }
 
 /**
@@ -259,6 +303,7 @@ export function isConnected(terminalId: string): boolean {
  * Close and remove a terminal's connection.
  */
 export function closeConnection(terminalId: string) {
+  connectionStatuses[terminalId] = false;
   const conn = connections.get(terminalId);
   if (conn) {
     conn.callbacks.clear();

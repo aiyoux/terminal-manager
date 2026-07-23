@@ -8,6 +8,8 @@
     subscribe,
     getBuffer,
     isConnected as checkConnected,
+    connectionStatuses,
+    reconnectConnection,
   } from '$lib/connectionManager';
   import { updateTerminalFontSize, type SavedCommand } from '$lib/stores.svelte';
 
@@ -32,7 +34,7 @@
   let resizeObserver: ResizeObserver;
   let unsubscribe: (() => void) | null = null;
 
-  let connected = $state(false);
+  let connected = $derived(!!connectionStatuses[terminalId]);
   let statusInterval: ReturnType<typeof setInterval>;
   let lastCols = 0;
   let lastRows = 0;
@@ -146,31 +148,20 @@
       resizeTimeout = setTimeout(safeFit, 150);
     });
     resizeObserver.observe(terminalContainer);
-
-    statusInterval = setInterval(() => {
-      connected = checkConnected(terminalId);
-    }, 1000);
   });
 
   onDestroy(() => {
     if (unsubscribe) unsubscribe();
     if (term) term.dispose();
     if (resizeObserver) resizeObserver.disconnect();
-    if (statusInterval) clearInterval(statusInterval);
   });
 
   function handleReconnect() {
-    import('$lib/connectionManager').then(m => {
-      safeFit();
-      m.getOrCreateConnection(terminalId, wsUrl, tmuxSession, workingDir, term.cols, term.rows);
-      if (unsubscribe) unsubscribe();
-      unsubscribe = m.subscribe(terminalId, (data) => {
-        term.write(data);
-      });
-      setTimeout(() => {
-        m.sendResize(terminalId, term.cols, term.rows);
-      }, 200);
-    });
+    safeFit();
+    reconnectConnection(terminalId, wsUrl, tmuxSession, workingDir);
+    setTimeout(() => {
+      if (term) sendResize(terminalId, term.cols, term.rows);
+    }, 200);
   }
 
   // React to font size changes

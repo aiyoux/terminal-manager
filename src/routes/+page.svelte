@@ -1,6 +1,6 @@
 <script lang="ts">
   import Terminal from '$lib/components/Terminal.svelte';
-  import { closeConnection, sendInput } from '$lib/connectionManager';
+  import { closeConnection, sendInput, isConnected, reconnectConnection, connectionStatuses } from '$lib/connectionManager';
   import {
     getConnections,
     getTerminalGroups,
@@ -506,11 +506,35 @@
     if (activeTerminalId === terminalId) setActiveTerminalId('');
   }
 
+  function handleSelectTerminal(terminalId: string) {
+    gridViewProjectId = '';
+    gridViewConnId = '';
+    setActiveTerminalId(terminalId);
+
+    if (!mountedTerminalIds.has(terminalId)) {
+      mountedTerminalIds.add(terminalId);
+      mountedTerminalIds = new Set(mountedTerminalIds);
+    }
+
+    if (!isConnected(terminalId)) {
+      const termInfo = allTerminals.find(t => t.id === terminalId);
+      if (termInfo) {
+        reconnectConnection(terminalId, termInfo.wsUrl, termInfo.tmuxSession, termInfo.workingDir);
+      }
+    }
+  }
+
   function handleReconnect(terminalId: string, e: Event) {
     e.stopPropagation();
-    mountedTerminalIds.add(terminalId);
-    mountedTerminalIds = new Set(mountedTerminalIds);
+    if (!mountedTerminalIds.has(terminalId)) {
+      mountedTerminalIds.add(terminalId);
+      mountedTerminalIds = new Set(mountedTerminalIds);
+    }
     setActiveTerminalId(terminalId);
+    const termInfo = allTerminals.find(t => t.id === terminalId);
+    if (termInfo) {
+      reconnectConnection(terminalId, termInfo.wsUrl, termInfo.tmuxSession, termInfo.workingDir);
+    }
   }
 
   async function handleAddCommand(connId: string, projectId: string, terminalId: string, e: Event) {
@@ -792,6 +816,8 @@
                       {#if !project.collapsed}
                         <div class="ml-4 border-l border-slate-800/50 pl-2">
                           {#each project.terminals as terminal, termIdx (terminal.id)}
+                            {@const isMounted = mountedTerminalIds.has(terminal.id)}
+                            {@const isConn = !!connectionStatuses[terminal.id]}
                             <!-- Terminal row -->
                             <div
                               class="mb-0.5 transition-all {dragOverItem?.type === 'terminal' && dragOverItem?.id === terminal.id ? 'border-t-2 border-sky-400' : ''} {draggedItem?.type === 'terminal' && draggedItem?.id === terminal.id ? 'opacity-50' : ''}"
@@ -803,7 +829,7 @@
                             >
                               <button
                                 class="w-full flex items-center justify-between px-2 py-1 rounded-md text-xs transition-all group {activeTerminalId === terminal.id ? 'bg-sky-500/10 text-sky-400 ring-1 ring-sky-500/30' : 'text-slate-400 hover:bg-white/5 hover:text-slate-200'}"
-                                onclick={() => { gridViewProjectId = ''; gridViewConnId = ''; setActiveTerminalId(terminal.id); }}
+                                onclick={() => handleSelectTerminal(terminal.id)}
                               >
                                 <div class="flex items-center gap-1.5 overflow-hidden">
                                   <div class="cursor-grab active:cursor-grabbing p-0.5 text-slate-600 hover:text-slate-400 opacity-0 group-hover:opacity-100 transition-opacity">
@@ -818,7 +844,7 @@
                                   >
                                     <svg xmlns="http://www.w3.org/2000/svg" width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="transition-transform {terminal.collapsed ? '-rotate-90' : ''}"><polyline points="6 9 12 15 18 9"/></svg>
                                   </div>
-                                  <div class={`w-1.5 h-1.5 rounded-full shrink-0 ${mountedTerminalIds.has(terminal.id) ? 'bg-emerald-400' : 'bg-slate-600'}`}></div>
+                                  <div class={`w-1.5 h-1.5 rounded-full shrink-0 ${!isMounted ? 'bg-slate-600' : (isConn ? 'bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.5)]' : 'bg-rose-500 shadow-[0_0_6px_rgba(244,63,94,0.5)]')}`}></div>
                                   <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
                                   <span class="truncate">{terminal.name}</span>
                                 </div>
@@ -1052,6 +1078,8 @@
                   {:else}
                     {#each group.terminalIds as terminalId, termIdx (terminalId)}
                       {@const terminal = allTerminals.find(t => t.id === terminalId)}
+                      {@const isMounted = mountedTerminalIds.has(terminalId)}
+                      {@const isConn = !!connectionStatuses[terminalId]}
                       {#if terminal}
                         <!-- Group Terminal row -->
                         <div
@@ -1064,13 +1092,13 @@
                         >
                           <button
                             class="w-full flex items-center justify-between px-2 py-1 rounded-md text-xs transition-all group {activeTerminalId === terminal.id ? 'bg-sky-500/10 text-sky-400 ring-1 ring-sky-500/30' : 'text-slate-400 hover:bg-white/5 hover:text-slate-200'}"
-                            onclick={() => { gridViewProjectId = ''; gridViewConnId = ''; setActiveTerminalId(terminal.id); }}
+                            onclick={() => handleSelectTerminal(terminal.id)}
                           >
                             <div class="flex items-center gap-1.5 overflow-hidden">
                               <div class="cursor-grab active:cursor-grabbing p-0.5 text-slate-600 hover:text-slate-400 opacity-0 group-hover:opacity-100 transition-opacity">
                                 <svg xmlns="http://www.w3.org/2000/svg" width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="5" r="1"/><circle cx="9" cy="12" r="1"/><circle cx="9" cy="19" r="1"/><circle cx="15" cy="5" r="1"/><circle cx="15" cy="12" r="1"/><circle cx="15" cy="19" r="1"/></svg>
                               </div>
-                              <div class={`w-1.5 h-1.5 rounded-full shrink-0 ${mountedTerminalIds.has(terminal.id) ? 'bg-emerald-400' : 'bg-slate-600'}`}></div>
+                              <div class={`w-1.5 h-1.5 rounded-full shrink-0 ${!isMounted ? 'bg-slate-600' : (isConn ? 'bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.5)]' : 'bg-rose-500 shadow-[0_0_6px_rgba(244,63,94,0.5)]')}`}></div>
                               <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
                               <span class="truncate">{terminal.name}</span>
                             </div>
@@ -1094,14 +1122,16 @@
             <p class="text-[10px] text-slate-600 italic px-2 py-4 text-center">No pinned terminals yet. Pin terminals using the pin button in the terminal header.</p>
           {:else}
             {#each pinnedTerminals as terminal (terminal.id)}
+              {@const isMounted = mountedTerminalIds.has(terminal.id)}
+              {@const isConn = !!connectionStatuses[terminal.id]}
               <div class="mb-0.5">
                 <button
                   class="w-full flex items-center justify-between px-2 py-1 rounded-md text-xs transition-all group {activeTerminalId === terminal.id ? 'bg-sky-500/10 text-sky-400 ring-1 ring-sky-500/30' : 'text-slate-400 hover:bg-white/5 hover:text-slate-200'}"
-                  onclick={() => { gridViewProjectId = ''; gridViewConnId = ''; setActiveTerminalId(terminal.id); }}
+                  onclick={() => handleSelectTerminal(terminal.id)}
                 >
                   <div class="flex items-center gap-1.5 overflow-hidden">
                     <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0 text-amber-400"><path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"/></svg>
-                    <div class={`w-1.5 h-1.5 rounded-full shrink-0 ${mountedTerminalIds.has(terminal.id) ? 'bg-emerald-400' : 'bg-slate-600'}`}></div>
+                    <div class={`w-1.5 h-1.5 rounded-full shrink-0 ${!isMounted ? 'bg-slate-600' : (isConn ? 'bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.5)]' : 'bg-rose-500 shadow-[0_0_6px_rgba(244,63,94,0.5)]')}`}></div>
                     <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
                     <span class="truncate">{terminal.name}</span>
                   </div>
