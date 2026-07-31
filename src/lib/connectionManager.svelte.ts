@@ -216,7 +216,19 @@ export function reconnectConnection(
 
   const savedCallbacks = existing ? existing.callbacks : new Set<DataCallback>();
 
+  // Before closing old connection, send mode-reset sequences to all attached
+  // xterm instances. Previous sessions (e.g. tmux) may have enabled mouse
+  // tracking — without resetting, xterm continues generating mouse event
+  // escape sequences that get sent as input to the new shell.
   if (existing) {
+    const resetSeqs =
+      '\x1b[?1000l' +  // Disable normal mouse tracking
+      '\x1b[?1002l' +  // Disable button-event mouse tracking
+      '\x1b[?1003l' +  // Disable any-event mouse tracking
+      '\x1b[?1006l' +  // Disable SGR extended mouse mode
+      '\x1b[?2004l';   // Disable bracketed paste mode
+    for (const cb of savedCallbacks) cb(resetSeqs);
+
     try { existing.ws.close(); } catch (_) {}
     connections.delete(terminalId);
   }

@@ -218,6 +218,27 @@ export function reorderTerminals(connId: string, projectId: string, fromIndex: n
   }
 }
 
+export function moveTerminal(terminalId: string, targetProjectId: string, toIndex: number = 0) {
+  const srcFound = findTerminalById(terminalId);
+  const destFound = findProjectById(targetProjectId);
+  if (!srcFound || !destFound) return;
+
+  const { project: srcProject, terminal } = srcFound;
+  const { project: destProject } = destFound;
+
+  // Remove from source project
+  const srcIdx = srcProject.terminals.findIndex(t => t.id === terminalId);
+  if (srcIdx > -1) {
+    srcProject.terminals.splice(srcIdx, 1);
+  }
+
+  // Insert into target project
+  const idx = Math.max(0, Math.min(toIndex, destProject.terminals.length));
+  destProject.terminals.splice(idx, 0, terminal);
+
+  save();
+}
+
 export function reorderSavedCommands(connId: string, projectId: string, terminalId: string, fromIndex: number, toIndex: number) {
   const conn = connections.find(c => c.id === connId);
   const project = conn?.projects.find(p => p.id === projectId);

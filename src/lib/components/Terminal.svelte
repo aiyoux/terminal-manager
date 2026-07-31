@@ -10,7 +10,7 @@
     isConnected as checkConnected,
     connectionStatuses,
     reconnectConnection,
-  } from '$lib/connectionManager';
+  } from '$lib/connectionManager.svelte';
   import { updateTerminalFontSize, type SavedCommand } from '$lib/stores.svelte';
 
   let { wsUrl, title = "Terminal", tmuxSession = '', workingDir = '', terminalId = '', fontSize = 14, connId = '', projectId = '', savedCommands = [], pinned = false, onAddToGroup, onTogglePin }: {
@@ -121,7 +121,7 @@
     });
 
     // Start connection first so subscribe can find it
-    const { getOrCreateConnection } = await import('$lib/connectionManager');
+    const { getOrCreateConnection } = await import('$lib/connectionManager.svelte');
     getOrCreateConnection(terminalId, wsUrl, tmuxSession, workingDir, term.cols, term.rows);
 
     // Replay buffered output (strip DA responses from historical data)
@@ -157,6 +157,18 @@
   });
 
   function handleReconnect() {
+    if (term) {
+      // Reset terminal modes before reconnecting. The previous session (e.g. tmux)
+      // may have enabled mouse tracking, bracketed paste, etc. Without resetting,
+      // xterm.js continues generating mouse event escape sequences (\e[<...M) that
+      // get sent as input to the new shell — which doesn't have tmux running yet —
+      // causing "zsh: command not found" errors from the escape code fragments.
+      term.write('\x1b[?1000l');  // Disable normal mouse tracking
+      term.write('\x1b[?1002l');  // Disable button-event mouse tracking
+      term.write('\x1b[?1003l');  // Disable any-event mouse tracking
+      term.write('\x1b[?1006l');  // Disable SGR extended mouse mode
+      term.write('\x1b[?2004l');  // Disable bracketed paste mode
+    }
     safeFit();
     reconnectConnection(terminalId, wsUrl, tmuxSession, workingDir);
     setTimeout(() => {

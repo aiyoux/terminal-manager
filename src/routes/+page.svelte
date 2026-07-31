@@ -1,6 +1,6 @@
 <script lang="ts">
   import Terminal from '$lib/components/Terminal.svelte';
-  import { closeConnection, sendInput, isConnected, reconnectConnection, connectionStatuses } from '$lib/connectionManager';
+  import { closeConnection, sendInput, isConnected, reconnectConnection, connectionStatuses } from '$lib/connectionManager.svelte';
   import {
     getConnections,
     getTerminalGroups,
@@ -37,6 +37,7 @@
     reorderConnections,
     reorderProjects,
     reorderTerminals,
+    moveTerminal,
     reorderSavedCommands,
     addTerminalGroup,
     removeTerminalGroup,
@@ -74,38 +75,52 @@
 
   function handleDragOver(e: DragEvent, type: string, id: string, index: number) {
     e.stopPropagation();
-    if (!draggedItem || draggedItem.type !== type) return;
+    if (!draggedItem) return;
+    if (draggedItem.type === 'terminal' && (type === 'terminal' || type === 'terminal-project-drop')) {
+      e.preventDefault();
+      dragOverItem = { type, id, index };
+      return;
+    }
+    if (draggedItem.type !== type) return;
     e.preventDefault();
     dragOverItem = { type, id, index };
   }
 
-  function handleDrop(e: DragEvent, type: string, toIndex: number, targetConnId?: string, targetGroupId?: string) {
+  function handleDrop(e: DragEvent, type: string, toIndex: number, targetConnId?: string, targetGroupId?: string, targetProjectId?: string) {
     e.stopPropagation();
-    if (!draggedItem || draggedItem.type !== type) return;
+    if (!draggedItem) return;
     const fromIndex = draggedItem.index;
 
-    if (type === 'connection') {
-      if (fromIndex === toIndex) return;
-      reorderConnections(fromIndex, toIndex);
-    } else if (type === 'project' && draggedItem.connId) {
-      const destConnId = targetConnId || draggedItem.connId;
-      const destGroupId = targetGroupId || null;
-      moveProject(draggedItem.id, destConnId, destGroupId, toIndex);
-    } else if (type === 'project-group' && draggedItem.connId) {
-      if (fromIndex === toIndex) return;
-      reorderProjectGroups(draggedItem.connId, fromIndex, toIndex);
-    } else if (type === 'terminal' && draggedItem.connId && draggedItem.projectId) {
-      if (fromIndex === toIndex) return;
-      reorderTerminals(draggedItem.projectId, fromIndex, toIndex);
-    } else if (type === 'command' && draggedItem.connId && draggedItem.projectId && draggedItem.terminalId) {
-      if (fromIndex === toIndex) return;
-      reorderSavedCommands(draggedItem.terminalId, fromIndex, toIndex);
-    } else if (type === 'group') {
-      if (fromIndex === toIndex) return;
-      reorderGroups(fromIndex, toIndex);
-    } else if (type === 'group-terminal' && draggedItem.groupId) {
-      if (fromIndex === toIndex) return;
-      reorderGroupTerminals(draggedItem.groupId, fromIndex, toIndex);
+    if (draggedItem.type === 'terminal' && (type === 'terminal' || type === 'terminal-project-drop')) {
+      const destProjectId = targetProjectId || (type === 'terminal-project-drop' ? targetProjectId : draggedItem.projectId);
+      if (destProjectId && draggedItem.projectId === destProjectId) {
+        if (fromIndex !== toIndex) {
+          reorderTerminals(draggedItem.connId!, destProjectId, fromIndex, toIndex);
+        }
+      } else if (destProjectId) {
+        moveTerminal(draggedItem.id, destProjectId, toIndex);
+      }
+    } else if (draggedItem.type === type) {
+      if (type === 'connection') {
+        if (fromIndex === toIndex) return;
+        reorderConnections(fromIndex, toIndex);
+      } else if (type === 'project' && draggedItem.connId) {
+        const destConnId = targetConnId || draggedItem.connId;
+        const destGroupId = targetGroupId || null;
+        moveProject(draggedItem.id, destConnId, destGroupId, toIndex);
+      } else if (type === 'project-group' && draggedItem.connId) {
+        if (fromIndex === toIndex) return;
+        reorderProjectGroups(draggedItem.connId, fromIndex, toIndex);
+      } else if (type === 'command' && draggedItem.connId && draggedItem.projectId && draggedItem.terminalId) {
+        if (fromIndex === toIndex) return;
+        reorderSavedCommands(draggedItem.terminalId, fromIndex, toIndex);
+      } else if (type === 'group') {
+        if (fromIndex === toIndex) return;
+        reorderGroups(fromIndex, toIndex);
+      } else if (type === 'group-terminal' && draggedItem.groupId) {
+        if (fromIndex === toIndex) return;
+        reorderGroupTerminals(draggedItem.groupId, fromIndex, toIndex);
+      }
     }
 
     draggedItem = null;
@@ -781,11 +796,23 @@
 
                   {#snippet projectSnippet(connId, project, projIdx, groupId)}
                     <div
-                      class="mb-1 transition-all {dragOverItem?.type === 'project' && dragOverItem?.id === project.id ? 'border-t-2 border-amber-500' : ''} {draggedItem?.type === 'project' && draggedItem?.id === project.id ? 'opacity-50' : ''}"
+                      class="mb-1 transition-all {dragOverItem?.type === 'project' && dragOverItem?.id === project.id ? 'border-t-2 border-amber-500' : ''} {draggedItem?.type === 'project' && draggedItem?.id === project.id ? 'opacity-50' : ''} {dragOverItem?.type === 'terminal-project-drop' && dragOverItem?.id === project.id ? 'bg-sky-500/10 rounded-md ring-1 ring-sky-500/30' : ''}"
                       draggable="true"
                       ondragstart={(e) => handleDragStart(e, 'project', project.id, projIdx, connId, undefined, undefined, groupId)}
-                      ondragover={(e) => handleDragOver(e, 'project', project.id, projIdx)}
-                      ondrop={(e) => handleDrop(e, 'project', projIdx, connId, groupId)}
+                      ondragover={(e) => {
+                        if (draggedItem?.type === 'project') {
+                          handleDragOver(e, 'project', project.id, projIdx);
+                        } else if (draggedItem?.type === 'terminal') {
+                          handleDragOver(e, 'terminal-project-drop', project.id, project.terminals.length);
+                        }
+                      }}
+                      ondrop={(e) => {
+                        if (draggedItem?.type === 'project') {
+                          handleDrop(e, 'project', projIdx, connId, groupId);
+                        } else if (draggedItem?.type === 'terminal') {
+                          handleDrop(e, 'terminal-project-drop', project.terminals.length, connId, groupId, project.id);
+                        }
+                      }}
                       ondragend={(e) => { e.stopPropagation(); draggedItem = null; dragOverItem = null; }}
                     >
                       <button class="w-full flex items-center justify-between px-2 py-1 rounded-md text-xs transition-colors hover:bg-white/5 group" onclick={() => toggleProjectCollapse(connId, project.id)}>
@@ -824,7 +851,7 @@
                               draggable="true"
                               ondragstart={(e) => handleDragStart(e, 'terminal', terminal.id, termIdx, connId, project.id)}
                               ondragover={(e) => handleDragOver(e, 'terminal', terminal.id, termIdx)}
-                              ondrop={(e) => handleDrop(e, 'terminal', termIdx)}
+                              ondrop={(e) => handleDrop(e, 'terminal', termIdx, connId, undefined, project.id)}
                               ondragend={(e) => { e.stopPropagation(); draggedItem = null; dragOverItem = null; }}
                             >
                               <button
