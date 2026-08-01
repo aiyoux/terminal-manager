@@ -249,6 +249,46 @@ export function reorderSavedCommands(connId: string, projectId: string, terminal
   }
 }
 
+export function moveSavedCommand(sourceTerminalId: string, destTerminalId: string, commandId: string, toIndex: number) {
+  const sourceFound = findTerminalById(sourceTerminalId);
+  const destFound = findTerminalById(destTerminalId);
+  if (!sourceFound || !destFound) return;
+
+  const cmdIdx = sourceFound.terminal.savedCommands.findIndex(c => c.id === commandId);
+  if (cmdIdx === -1) return;
+
+  const [cmd] = sourceFound.terminal.savedCommands.splice(cmdIdx, 1);
+
+  if (sourceTerminalId === destTerminalId) {
+    const idx = Math.max(0, Math.min(toIndex, sourceFound.terminal.savedCommands.length));
+    sourceFound.terminal.savedCommands.splice(idx, 0, cmd);
+  } else {
+    const idx = Math.max(0, Math.min(toIndex, destFound.terminal.savedCommands.length));
+    destFound.terminal.savedCommands.splice(idx, 0, cmd);
+  }
+
+  save();
+}
+
+export function duplicateSavedCommand(connId: string, projectId: string, terminalId: string, commandId: string): SavedCommand | null {
+  const found = findTerminalById(terminalId);
+  if (!found) return null;
+
+  const idx = found.terminal.savedCommands.findIndex(c => c.id === commandId);
+  if (idx === -1) return null;
+
+  const source = found.terminal.savedCommands[idx];
+  const newCmd: SavedCommand = {
+    ...source,
+    id: uid(),
+    label: `${source.label} (Copy)`,
+  };
+
+  found.terminal.savedCommands.splice(idx + 1, 0, newCmd);
+  save();
+  return newCmd;
+}
+
 // --- Connection CRUD ---
 
 export function getConnections(): Connection[] {
@@ -428,6 +468,36 @@ export function addTerminal(connId: string, projectId: string, name: string): Te
   activeTerminalId = terminal.id;
   save();
   return terminal;
+}
+
+export function duplicateTerminal(connId: string, projectId: string, terminalId: string): TerminalTab | null {
+  const found = findTerminalById(terminalId);
+  if (!found) return null;
+
+  const source = found.terminal;
+  const id = uid();
+  const newTerminal: TerminalTab = {
+    id,
+    name: `${source.name} (Copy)`,
+    tmuxSession: `td-${id}`,
+    workingDir: source.workingDir || '',
+    fontSize: source.fontSize || 14,
+    savedCommands: source.savedCommands ? JSON.parse(JSON.stringify(source.savedCommands)) : [],
+    collapsed: source.collapsed ?? true,
+    pinned: source.pinned ?? false,
+    gridHidden: source.gridHidden ?? false,
+  };
+
+  const idx = found.project.terminals.findIndex(t => t.id === terminalId);
+  if (idx > -1) {
+    found.project.terminals.splice(idx + 1, 0, newTerminal);
+  } else {
+    found.project.terminals.push(newTerminal);
+  }
+
+  activeTerminalId = newTerminal.id;
+  save();
+  return newTerminal;
 }
 
 export function removeTerminal(connId: string, projectId: string, terminalId: string) {

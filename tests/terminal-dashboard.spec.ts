@@ -15,8 +15,8 @@ test.describe('Terminal Dashboard E2E Suite', () => {
   });
 
   test('should allow font size adjustment on active terminal', async ({ page }) => {
-    const decBtn = page.locator('button[title="Decrease font size"]').first();
-    const incBtn = page.locator('button[title="Increase font size"]').first();
+    const decBtn = page.locator('button[data-tooltip="Decrease font size"], button[title="Decrease font size"], button[aria-label="Decrease font size"]').first();
+    const incBtn = page.locator('button[data-tooltip="Increase font size"], button[title="Increase font size"], button[aria-label="Increase font size"]').first();
 
     if (await incBtn.isVisible()) {
       await incBtn.click();
@@ -29,7 +29,7 @@ test.describe('Terminal Dashboard E2E Suite', () => {
   });
 
   test('should provide clear screen action on terminal window', async ({ page }) => {
-    const clearBtn = page.locator('button[title="Clear screen"], button[aria-label="Clear screen"]').first();
+    const clearBtn = page.locator('button[data-tooltip="Clear screen output"], button[title="Clear screen"], button[aria-label="Clear screen"]').first();
 
     if (await clearBtn.isVisible()) {
       await clearBtn.click();

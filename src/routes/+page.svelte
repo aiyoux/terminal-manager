@@ -20,10 +20,12 @@
     moveProject,
     findProjectById,
     addTerminal,
+    duplicateTerminal,
     removeTerminal,
     toggleTerminalCollapse,
     toggleTerminalGridHidden,
     addSavedCommand,
+    duplicateSavedCommand,
     removeSavedCommand,
     updateSavedCommand,
     toggleCommandOnConnect,
@@ -39,6 +41,7 @@
     reorderTerminals,
     moveTerminal,
     reorderSavedCommands,
+    moveSavedCommand,
     addTerminalGroup,
     removeTerminalGroup,
     toggleGroupCollapse,
@@ -81,12 +84,17 @@
       dragOverItem = { type, id, index };
       return;
     }
+    if (draggedItem.type === 'command' && (type === 'command' || type === 'command-terminal-drop')) {
+      e.preventDefault();
+      dragOverItem = { type, id, index };
+      return;
+    }
     if (draggedItem.type !== type) return;
     e.preventDefault();
     dragOverItem = { type, id, index };
   }
 
-  function handleDrop(e: DragEvent, type: string, toIndex: number, targetConnId?: string, targetGroupId?: string, targetProjectId?: string) {
+  function handleDrop(e: DragEvent, type: string, toIndex: number, targetConnId?: string, targetGroupId?: string, targetProjectId?: string, targetTerminalId?: string) {
     e.stopPropagation();
     if (!draggedItem) return;
     const fromIndex = draggedItem.index;
@@ -100,6 +108,11 @@
       } else if (destProjectId) {
         moveTerminal(draggedItem.id, destProjectId, toIndex);
       }
+    } else if (draggedItem.type === 'command' && (type === 'command' || type === 'command-terminal-drop')) {
+      const destTerminalId = targetTerminalId || (type === 'command-terminal-drop' ? id : draggedItem.terminalId);
+      if (destTerminalId && draggedItem.terminalId) {
+        moveSavedCommand(draggedItem.terminalId, destTerminalId, draggedItem.id, toIndex);
+      }
     } else if (draggedItem.type === type) {
       if (type === 'connection') {
         if (fromIndex === toIndex) return;
@@ -111,9 +124,6 @@
       } else if (type === 'project-group' && draggedItem.connId) {
         if (fromIndex === toIndex) return;
         reorderProjectGroups(draggedItem.connId, fromIndex, toIndex);
-      } else if (type === 'command' && draggedItem.connId && draggedItem.projectId && draggedItem.terminalId) {
-        if (fromIndex === toIndex) return;
-        reorderSavedCommands(draggedItem.terminalId, fromIndex, toIndex);
       } else if (type === 'group') {
         if (fromIndex === toIndex) return;
         reorderGroups(fromIndex, toIndex);
@@ -513,6 +523,15 @@
     mountedTerminalIds = new Set(mountedTerminalIds);
   }
 
+  function handleDuplicateTerminal(connId: string, projectId: string, terminalId: string, e: Event) {
+    e.stopPropagation();
+    const dup = duplicateTerminal(connId, projectId, terminalId);
+    if (dup) {
+      mountedTerminalIds.add(dup.id);
+      mountedTerminalIds = new Set(mountedTerminalIds);
+    }
+  }
+
   function handleDisconnect(terminalId: string, e: Event) {
     e.stopPropagation();
     closeConnection(terminalId);
@@ -633,7 +652,8 @@
       <button
         onclick={() => { sidebarOpen = !sidebarOpen; }}
         class="p-1.5 -ml-2 rounded-lg text-slate-400 hover:text-sky-400 hover:bg-sky-500/10 transition-all active:scale-95"
-        title={sidebarOpen ? 'Close sidebar' : 'Open sidebar'}
+        data-tooltip={sidebarOpen ? 'Collapse sidebar' : 'Expand sidebar'}
+        data-tooltip-pos="bottom-right"
       >
         {#if sidebarOpen}
           <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="3" x2="9" y2="21"/></svg>
@@ -648,7 +668,8 @@
       <div class="flex items-center gap-1.5 mr-2">
         <button
           onclick={handleExport}
-          title="Export Settings"
+          data-tooltip="Export dashboard configuration & connection settings to JSON"
+          data-tooltip-pos="bottom"
           class="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] font-semibold tracking-wide text-slate-400 hover:text-sky-400 hover:bg-sky-500/10 transition-all active:scale-95 group"
         >
           <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="group-hover:translate-y-[-1px] transition-transform"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
@@ -656,7 +677,8 @@
         </button>
         <button
           onclick={() => fileInput.click()}
-          title="Import Settings"
+          data-tooltip="Import dashboard settings & connections from JSON backup file"
+          data-tooltip-pos="bottom"
           class="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] font-semibold tracking-wide text-slate-400 hover:text-emerald-400 hover:bg-emerald-500/10 transition-all active:scale-95 group"
         >
           <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="group-hover:translate-y-[-1px] transition-transform"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
@@ -667,7 +689,7 @@
 
       <div class="w-px h-4 bg-white/5 mr-1"></div>
       <div class="flex items-center gap-1.5">
-        <label class="flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11px] font-semibold tracking-wide text-slate-400 hover:text-violet-400 hover:bg-violet-500/10 transition-all">
+        <label class="flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11px] font-semibold tracking-wide text-slate-400 hover:text-violet-400 hover:bg-violet-500/10 transition-all" data-tooltip="Set fixed grid columns count (leave blank for auto)" data-tooltip-pos="bottom">
           <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
           <span>COLS</span>
           <input
@@ -683,7 +705,7 @@
             }}
           />
         </label>
-        <label class="flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11px] font-semibold tracking-wide text-slate-400 hover:text-violet-400 hover:bg-violet-500/10 transition-all">
+        <label class="flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11px] font-semibold tracking-wide text-slate-400 hover:text-violet-400 hover:bg-violet-500/10 transition-all" data-tooltip="Set fixed grid rows count (leave blank for auto)" data-tooltip-pos="bottom">
           <span>ROWS</span>
           <input
             type="number"
@@ -718,12 +740,16 @@
         <button
           class="flex-1 py-1.5 text-xs font-semibold rounded-md transition-colors {activeSidebarTab === 'connections' ? 'bg-white/10 text-white' : 'text-slate-500 hover:text-slate-300 hover:bg-white/5'}"
           onclick={() => { activeSidebarTab = 'connections'; if (gridViewConnId === '__pinned__') { gridViewConnId = ''; gridViewProjectId = ''; } }}
+          data-tooltip="View server connections and project workspaces"
+          data-tooltip-pos="bottom"
         >
           Connections
         </button>
         <button
           class="flex-1 py-1.5 text-xs font-semibold rounded-md transition-colors {activeSidebarTab === 'groups' ? 'bg-white/10 text-white' : 'text-slate-500 hover:text-slate-300 hover:bg-white/5'}"
           onclick={() => { activeSidebarTab = 'groups'; if (gridViewConnId === '__pinned__') { gridViewConnId = ''; gridViewProjectId = ''; } }}
+          data-tooltip="View custom multi-terminal layout groups"
+          data-tooltip-pos="bottom"
         >
           Groups
         </button>
@@ -737,6 +763,8 @@
             for (const t of pinnedTerminals) mountedTerminalIds.add(t.id);
             mountedTerminalIds = new Set(mountedTerminalIds);
           }}
+          data-tooltip="View pinned active terminals"
+          data-tooltip-pos="bottom"
         >
           Pinned
         </button>
@@ -770,21 +798,21 @@
             >
               <button class="w-full flex items-center justify-between px-2 py-1.5 rounded-lg text-xs font-semibold transition-colors hover:bg-white/5 group" onclick={() => toggleConnectionCollapse(conn.id)}>
                 <div class="flex items-center gap-2 overflow-hidden">
-                  <div class="cursor-grab active:cursor-grabbing p-0.5 text-slate-600 hover:text-slate-400 opacity-0 group-hover:opacity-100 transition-opacity">
+                  <div class="cursor-grab active:cursor-grabbing p-0.5 text-slate-600 hover:text-slate-400 opacity-0 group-hover:opacity-100 transition-opacity" data-tooltip="Drag to reorder connection" data-tooltip-pos="bottom-right">
                     <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="5" r="1"/><circle cx="9" cy="12" r="1"/><circle cx="9" cy="19" r="1"/><circle cx="15" cy="5" r="1"/><circle cx="15" cy="12" r="1"/><circle cx="15" cy="19" r="1"/></svg>
                   </div>
-                  <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0 text-sky-400 transition-transform {conn.collapsed ? '-rotate-90' : ''}"><polyline points="6 9 12 15 18 9"/></svg>
-                  <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0 text-sky-400"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+                  <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0 text-sky-400 transition-transform {conn.collapsed ? '-rotate-90' : ''}" data-tooltip={conn.collapsed ? 'Expand connection' : 'Collapse connection'} data-tooltip-pos="bottom-right"><polyline points="6 9 12 15 18 9"/></svg>
+                  <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0 text-sky-400" data-tooltip="Server connection" data-tooltip-pos="bottom-right"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
                   <span class="truncate text-slate-200">{conn.name}</span>
                 </div>
                 <div class="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                  <div role="button" tabindex="0" title="Add Project Group" onclick={(e) => { e.stopPropagation(); handleAddProjectGroup(conn.id); }} onkeydown={(e) => e.key === 'Enter' && handleAddProjectGroup(conn.id)} class="p-0.5 text-slate-500 hover:text-violet-400 rounded hover:bg-violet-500/20 transition-colors">
+                  <div role="button" tabindex="0" data-tooltip="Add project group" data-tooltip-pos="bottom-left" onclick={(e) => { e.stopPropagation(); handleAddProjectGroup(conn.id); }} onkeydown={(e) => e.key === 'Enter' && handleAddProjectGroup(conn.id)} class="p-0.5 text-slate-500 hover:text-violet-400 rounded hover:bg-violet-500/20 transition-colors">
                     <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2v11z"/><line x1="12" y1="11" x2="12" y2="17"/><line x1="9" y1="14" x2="15" y2="14"/></svg>
                   </div>
-                  <div role="button" tabindex="0" title="Add Project" onclick={(e) => { e.stopPropagation(); handleAddProject(conn.id); }} onkeydown={(e) => e.key === 'Enter' && handleAddProject(conn.id)} class="p-0.5 text-slate-500 hover:text-emerald-400 rounded hover:bg-emerald-500/20 transition-colors">
+                  <div role="button" tabindex="0" data-tooltip="Add new project workspace" data-tooltip-pos="bottom-left" onclick={(e) => { e.stopPropagation(); handleAddProject(conn.id); }} onkeydown={(e) => e.key === 'Enter' && handleAddProject(conn.id)} class="p-0.5 text-slate-500 hover:text-emerald-400 rounded hover:bg-emerald-500/20 transition-colors">
                     <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
                   </div>
-                  <div role="button" tabindex="0" title="Remove Connection" onclick={(e) => handleRemoveConnection(conn.id, e)} onkeydown={(e) => e.key === 'Enter' && handleRemoveConnection(conn.id, e)} class="p-0.5 text-slate-500 hover:text-rose-400 rounded hover:bg-rose-500/20 transition-colors">
+                  <div role="button" tabindex="0" data-tooltip="Remove connection server" data-tooltip-pos="bottom-left" onclick={(e) => handleRemoveConnection(conn.id, e)} onkeydown={(e) => e.key === 'Enter' && handleRemoveConnection(conn.id, e)} class="p-0.5 text-slate-500 hover:text-rose-400 rounded hover:bg-rose-500/20 transition-colors">
                     <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
                   </div>
                 </div>
@@ -817,24 +845,24 @@
                     >
                       <button class="w-full flex items-center justify-between px-2 py-1 rounded-md text-xs transition-colors hover:bg-white/5 group" onclick={() => toggleProjectCollapse(connId, project.id)}>
                         <div class="flex items-center gap-2 overflow-hidden">
-                          <div class="cursor-grab active:cursor-grabbing p-0.5 text-slate-600 hover:text-slate-400 opacity-0 group-hover:opacity-100 transition-opacity">
+                          <div class="cursor-grab active:cursor-grabbing p-0.5 text-slate-600 hover:text-slate-400 opacity-0 group-hover:opacity-100 transition-opacity" data-tooltip="Drag to reorder project" data-tooltip-pos="bottom-right">
                             <svg xmlns="http://www.w3.org/2000/svg" width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="5" r="1"/><circle cx="9" cy="12" r="1"/><circle cx="9" cy="19" r="1"/><circle cx="15" cy="5" r="1"/><circle cx="15" cy="12" r="1"/><circle cx="15" cy="19" r="1"/></svg>
                           </div>
-                          <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0 text-amber-400 transition-transform {project.collapsed ? '-rotate-90' : ''}"><polyline points="6 9 12 15 18 9"/></svg>
-                          <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0 text-amber-400"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+                          <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0 text-amber-400 transition-transform {project.collapsed ? '-rotate-90' : ''}" data-tooltip={project.collapsed ? 'Expand project' : 'Collapse project'} data-tooltip-pos="bottom-right"><polyline points="6 9 12 15 18 9"/></svg>
+                          <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0 text-amber-400" data-tooltip="Project workspace" data-tooltip-pos="bottom-right"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
                           <span class="truncate text-slate-300">{project.name}</span>
                         </div>
                         <div class="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                          <div role="button" tabindex="0" title="Rename Project" onclick={(e) => handleRenameProject(connId, project.id, project.name, e)} onkeydown={(e) => e.key === 'Enter' && handleRenameProject(connId, project.id, project.name, e)} class="p-0.5 text-slate-500 hover:text-sky-400 rounded hover:bg-sky-500/20 transition-colors">
+                          <div role="button" tabindex="0" data-tooltip="Rename project" data-tooltip-pos="bottom-left" onclick={(e) => handleRenameProject(connId, project.id, project.name, e)} onkeydown={(e) => e.key === 'Enter' && handleRenameProject(connId, project.id, project.name, e)} class="p-0.5 text-slate-500 hover:text-sky-400 rounded hover:bg-sky-500/20 transition-colors">
                             <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/></svg>
                           </div>
-                          <div role="button" tabindex="0" title={gridViewProjectId === project.id ? 'Single View' : 'Grid View'} onclick={(e) => toggleGridView(connId, project.id, e)} onkeydown={(e) => e.key === 'Enter' && toggleGridView(connId, project.id, e)} class="p-0.5 rounded transition-colors {gridViewProjectId === project.id ? 'text-violet-400 bg-violet-500/20' : 'text-slate-500 hover:text-violet-400 hover:bg-violet-500/20'}">
+                          <div role="button" tabindex="0" data-tooltip={gridViewProjectId === project.id ? 'Switch to single terminal view' : 'Switch to multi-terminal grid view'} data-tooltip-pos="bottom-left" onclick={(e) => toggleGridView(connId, project.id, e)} onkeydown={(e) => e.key === 'Enter' && toggleGridView(connId, project.id, e)} class="p-0.5 rounded transition-colors {gridViewProjectId === project.id ? 'text-violet-400 bg-violet-500/20' : 'text-slate-500 hover:text-violet-400 hover:bg-violet-500/20'}">
                             <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
                           </div>
-                          <div role="button" tabindex="0" title="Add Terminal" onclick={(e) => { e.stopPropagation(); handleAddTerminal(connId, project.id); }} onkeydown={(e) => e.key === 'Enter' && handleAddTerminal(connId, project.id)} class="p-0.5 text-slate-500 hover:text-emerald-400 rounded hover:bg-emerald-500/20 transition-colors">
+                          <div role="button" tabindex="0" data-tooltip="Add new terminal session" data-tooltip-pos="bottom-left" onclick={(e) => { e.stopPropagation(); handleAddTerminal(connId, project.id); }} onkeydown={(e) => e.key === 'Enter' && handleAddTerminal(connId, project.id)} class="p-0.5 text-slate-500 hover:text-emerald-400 rounded hover:bg-emerald-500/20 transition-colors">
                             <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
                           </div>
-                          <div role="button" tabindex="0" title="Remove Project" onclick={(e) => handleRemoveProject(connId, project.id, e)} onkeydown={(e) => e.key === 'Enter' && handleRemoveProject(connId, project.id, e)} class="p-0.5 text-slate-500 hover:text-rose-400 rounded hover:bg-rose-500/20 transition-colors">
+                          <div role="button" tabindex="0" data-tooltip="Remove project" data-tooltip-pos="bottom-left" onclick={(e) => handleRemoveProject(connId, project.id, e)} onkeydown={(e) => e.key === 'Enter' && handleRemoveProject(connId, project.id, e)} class="p-0.5 text-slate-500 hover:text-rose-400 rounded hover:bg-rose-500/20 transition-colors">
                             <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
                           </div>
                         </div>
@@ -847,11 +875,23 @@
                             {@const isConn = !!connectionStatuses[terminal.id]}
                             <!-- Terminal row -->
                             <div
-                              class="mb-0.5 transition-all {dragOverItem?.type === 'terminal' && dragOverItem?.id === terminal.id ? 'border-t-2 border-sky-400' : ''} {draggedItem?.type === 'terminal' && draggedItem?.id === terminal.id ? 'opacity-50' : ''}"
+                              class="mb-0.5 transition-all {dragOverItem?.type === 'terminal' && dragOverItem?.id === terminal.id ? 'border-t-2 border-sky-400' : ''} {draggedItem?.type === 'terminal' && draggedItem?.id === terminal.id ? 'opacity-50' : ''} {dragOverItem?.type === 'command-terminal-drop' && dragOverItem?.id === terminal.id ? 'bg-emerald-500/10 rounded-md ring-1 ring-emerald-500/30' : ''}"
                               draggable="true"
                               ondragstart={(e) => handleDragStart(e, 'terminal', terminal.id, termIdx, connId, project.id)}
-                              ondragover={(e) => handleDragOver(e, 'terminal', terminal.id, termIdx)}
-                              ondrop={(e) => handleDrop(e, 'terminal', termIdx, connId, undefined, project.id)}
+                              ondragover={(e) => {
+                                if (draggedItem?.type === 'terminal') {
+                                  handleDragOver(e, 'terminal', terminal.id, termIdx);
+                                } else if (draggedItem?.type === 'command') {
+                                  handleDragOver(e, 'command-terminal-drop', terminal.id, terminal.savedCommands.length);
+                                }
+                              }}
+                              ondrop={(e) => {
+                                if (draggedItem?.type === 'terminal') {
+                                  handleDrop(e, 'terminal', termIdx, connId, undefined, project.id);
+                                } else if (draggedItem?.type === 'command') {
+                                  handleDrop(e, 'command-terminal-drop', terminal.savedCommands.length, undefined, undefined, undefined, terminal.id);
+                                }
+                              }}
                               ondragend={(e) => { e.stopPropagation(); draggedItem = null; dragOverItem = null; }}
                             >
                               <button
@@ -859,24 +899,24 @@
                                 onclick={() => handleSelectTerminal(terminal.id)}
                               >
                                 <div class="flex items-center gap-1.5 overflow-hidden">
-                                  <div class="cursor-grab active:cursor-grabbing p-0.5 text-slate-600 hover:text-slate-400 opacity-0 group-hover:opacity-100 transition-opacity">
+                                  <div class="cursor-grab active:cursor-grabbing p-0.5 text-slate-600 hover:text-slate-400 opacity-0 group-hover:opacity-100 transition-opacity" data-tooltip="Drag to reorder terminal" data-tooltip-pos="bottom-right">
                                     <svg xmlns="http://www.w3.org/2000/svg" width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="5" r="1"/><circle cx="9" cy="12" r="1"/><circle cx="9" cy="19" r="1"/><circle cx="15" cy="5" r="1"/><circle cx="15" cy="12" r="1"/><circle cx="15" cy="19" r="1"/></svg>
                                   </div>
                                   <!-- Expand arrow for saved commands -->
                                   <div
-                                    role="button" tabindex="0" title="Saved Commands"
+                                    role="button" tabindex="0" data-tooltip="Saved command shortcuts" data-tooltip-pos="bottom-left"
                                     onclick={(e) => { e.stopPropagation(); toggleTerminalCollapse(connId, project.id, terminal.id); }}
                                     onkeydown={(e) => e.key === 'Enter' && toggleTerminalCollapse(connId, project.id, terminal.id)}
                                     class="shrink-0 p-0.5 -ml-0.5 hover:bg-white/10 rounded transition-colors"
                                   >
                                     <svg xmlns="http://www.w3.org/2000/svg" width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="transition-transform {terminal.collapsed ? '-rotate-90' : ''}"><polyline points="6 9 12 15 18 9"/></svg>
                                   </div>
-                                  <div class={`w-1.5 h-1.5 rounded-full shrink-0 ${!isMounted ? 'bg-slate-600' : (isConn ? 'bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.5)]' : 'bg-rose-500 shadow-[0_0_6px_rgba(244,63,94,0.5)]')}`}></div>
-                                  <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+                                  <div class={`w-1.5 h-1.5 rounded-full shrink-0 ${!isMounted ? 'bg-slate-600' : (isConn ? 'bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.5)]' : 'bg-rose-500 shadow-[0_0_6px_rgba(244,63,94,0.5)]')}`} data-tooltip={!isMounted ? 'Not initialized' : (isConn ? 'Connected' : 'Disconnected')} data-tooltip-pos="bottom-right"></div>
+                                  <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0" data-tooltip="Terminal session" data-tooltip-pos="bottom-right"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
                                   <span class="truncate">{terminal.name}</span>
                                 </div>
                                 <div class="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-all">
-                                  <div role="button" tabindex="0" title={terminal.gridHidden ? 'Show in Grid' : 'Hide in Grid'} onclick={(e) => { e.stopPropagation(); toggleTerminalGridHidden(connId, project.id, terminal.id); }} onkeydown={(e) => e.key === 'Enter' && toggleTerminalGridHidden(connId, project.id, terminal.id)} class="p-0.5 rounded transition-colors {terminal.gridHidden ? 'text-slate-600 hover:text-slate-400' : 'text-sky-400 bg-sky-500/10 hover:bg-sky-500/20'}">
+                                  <div role="button" tabindex="0" data-tooltip={terminal.gridHidden ? 'Show in grid view' : 'Hide from grid view'} data-tooltip-pos="bottom-left" onclick={(e) => { e.stopPropagation(); toggleTerminalGridHidden(connId, project.id, terminal.id); }} onkeydown={(e) => e.key === 'Enter' && toggleTerminalGridHidden(connId, project.id, terminal.id)} class="p-0.5 rounded transition-colors {terminal.gridHidden ? 'text-slate-600 hover:text-slate-400' : 'text-sky-400 bg-sky-500/10 hover:bg-sky-500/20'}">
                                     <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                                       {#if terminal.gridHidden}
                                         <path d="M9.88 9.88a3 3 0 1 0 4.24 4.24"/><path d="M10.73 5.08A10.43 10.43 0 0 1 12 5c7 0 10 7 10 7a13.16 13.16 0 0 1-1.67 2.68"/><path d="M6.61 6.61A13.526 13.526 0 0 0 2 12s3 7 10 7a9.74 9.74 0 0 0 5.39-1.61"/><line x1="2" y1="2" x2="22" y2="22"/>
@@ -886,18 +926,21 @@
                                     </svg>
                                   </div>
                                   {#if mountedTerminalIds.has(terminal.id)}
-                                    <div role="button" tabindex="0" title="Disconnect" onclick={(e) => handleDisconnect(terminal.id, e)} onkeydown={(e) => e.key === 'Enter' && handleDisconnect(terminal.id, e)} class="p-0.5 text-slate-500 hover:text-amber-400 rounded hover:bg-amber-500/20 transition-colors">
+                                    <div role="button" tabindex="0" data-tooltip="Disconnect terminal session" data-tooltip-pos="bottom-left" onclick={(e) => handleDisconnect(terminal.id, e)} onkeydown={(e) => e.key === 'Enter' && handleDisconnect(terminal.id, e)} class="p-0.5 text-slate-500 hover:text-amber-400 rounded hover:bg-amber-500/20 transition-colors">
                                       <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M18.36 6.64A9 9 0 0 1 20.77 15"/><path d="M6.16 6.16a9 9 0 1 0 12.68 12.68"/><line x1="2" y1="2" x2="22" y2="22"/></svg>
                                     </div>
                                   {:else}
-                                    <div role="button" tabindex="0" title="Reconnect" onclick={(e) => handleReconnect(terminal.id, e)} onkeydown={(e) => e.key === 'Enter' && handleReconnect(terminal.id, e)} class="p-0.5 text-slate-500 hover:text-emerald-400 rounded hover:bg-emerald-500/20 transition-colors">
+                                    <div role="button" tabindex="0" data-tooltip="Reconnect terminal session" data-tooltip-pos="bottom-left" onclick={(e) => handleReconnect(terminal.id, e)} onkeydown={(e) => e.key === 'Enter' && handleReconnect(terminal.id, e)} class="p-0.5 text-slate-500 hover:text-emerald-400 rounded hover:bg-emerald-500/20 transition-colors">
                                       <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.55a11 11 0 0 1 14.08 0"/><path d="M1.42 9a16 16 0 0 1 21.16 0"/><path d="M8.53 16.11a6 6 0 0 1 6.95 0"/><line x1="12" y1="20" x2="12.01" y2="20"/></svg>
                                     </div>
                                   {/if}
-                                  <div role="button" tabindex="0" title="Rename" onclick={(e) => handleRenameTerminal(connId, project.id, terminal.id, e)} onkeydown={(e) => e.key === 'Enter' && handleRenameTerminal(connId, project.id, terminal.id, e)} class="p-0.5 text-slate-500 hover:text-sky-400 rounded hover:bg-sky-500/20 transition-colors">
+                                  <div role="button" tabindex="0" data-tooltip="Duplicate terminal" data-tooltip-pos="bottom-left" onclick={(e) => handleDuplicateTerminal(connId, project.id, terminal.id, e)} onkeydown={(e) => e.key === 'Enter' && handleDuplicateTerminal(connId, project.id, terminal.id, e)} class="p-0.5 text-slate-500 hover:text-sky-400 rounded hover:bg-sky-500/20 transition-colors">
+                                    <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                                  </div>
+                                  <div role="button" tabindex="0" data-tooltip="Rename terminal" data-tooltip-pos="bottom-left" onclick={(e) => handleRenameTerminal(connId, project.id, terminal.id, e)} onkeydown={(e) => e.key === 'Enter' && handleRenameTerminal(connId, project.id, terminal.id, e)} class="p-0.5 text-slate-500 hover:text-sky-400 rounded hover:bg-sky-500/20 transition-colors">
                                     <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
                                   </div>
-                                  <div role="button" tabindex="0" title="Remove" onclick={(e) => handleRemoveTerminal(connId, project.id, terminal.id, e)} onkeydown={(e) => e.key === 'Enter' && handleRemoveTerminal(connId, project.id, terminal.id, e)} class="p-0.5 text-slate-500 hover:text-rose-400 rounded hover:bg-rose-500/20 transition-colors">
+                                  <div role="button" tabindex="0" data-tooltip="Remove terminal" data-tooltip-pos="bottom-left" onclick={(e) => handleRemoveTerminal(connId, project.id, terminal.id, e)} onkeydown={(e) => e.key === 'Enter' && handleRemoveTerminal(connId, project.id, terminal.id, e)} class="p-0.5 text-slate-500 hover:text-rose-400 rounded hover:bg-rose-500/20 transition-colors">
                                     <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
                                   </div>
                                 </div>
@@ -911,7 +954,7 @@
                                     <div class="flex items-center justify-between px-2">
                                       <span class="text-[9px] uppercase tracking-widest text-slate-600">Commands</span>
                                       <div
-                                        role="button" tabindex="0" title="Add Command"
+                                        role="button" tabindex="0" data-tooltip="Add saved command shortcut" data-tooltip-pos="bottom-left"
                                         onclick={(e) => handleAddCommand(connId, project.id, terminal.id, e)}
                                         onkeydown={(e) => e.key === 'Enter' && handleAddCommand(connId, project.id, terminal.id, e)}
                                         class="p-0.5 text-slate-600 hover:text-emerald-400 rounded hover:bg-emerald-500/20 transition-colors"
@@ -929,15 +972,16 @@
                                           draggable="true"
                                           ondragstart={(e) => handleDragStart(e, 'command', cmd.id, cmdIdx, connId, project.id, terminal.id)}
                                           ondragover={(e) => handleDragOver(e, 'command', cmd.id, cmdIdx)}
-                                          ondrop={(e) => handleDrop(e, 'command', cmdIdx)}
+                                          ondrop={(e) => handleDrop(e, 'command', cmdIdx, undefined, undefined, undefined, terminal.id)}
                                           ondragend={(e) => { e.stopPropagation(); draggedItem = null; dragOverItem = null; }}
                                         >
-                                          <div class="cursor-grab active:cursor-grabbing p-0.5 text-slate-700 hover:text-slate-500 opacity-0 group-hover/cmd:opacity-100 transition-opacity">
+                                          <div class="cursor-grab active:cursor-grabbing p-0.5 text-slate-700 hover:text-slate-500 opacity-0 group-hover/cmd:opacity-100 transition-opacity" data-tooltip="Drag to reorder or move command to another terminal" data-tooltip-pos="bottom-right">
                                             <svg xmlns="http://www.w3.org/2000/svg" width="7" height="7" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="5" r="1"/><circle cx="9" cy="12" r="1"/><circle cx="9" cy="19" r="1"/><circle cx="15" cy="5" r="1"/><circle cx="15" cy="12" r="1"/><circle cx="15" cy="19" r="1"/></svg>
                                           </div>
                                           <!-- On-connect toggle -->
                                           <button
-                                            title={cmd.isOnConnect ? 'Auto-run on connect (click to disable)' : 'Click to auto-run on connect'}
+                                            data-tooltip={cmd.isOnConnect ? 'Auto-run on connect (click to disable)' : 'Auto-run on connect (click to enable)'}
+                                            data-tooltip-pos="top-left"
                                             onclick={(e) => { e.stopPropagation(); toggleCommandOnConnect(connId, project.id, terminal.id, cmd.id); }}
                                             class="shrink-0 w-4 h-4 flex items-center justify-center rounded transition-colors {cmd.isOnConnect ? 'text-emerald-400 bg-emerald-500/20' : 'text-slate-600 hover:text-slate-400'}"
                                           >
@@ -945,7 +989,8 @@
                                           </button>
                                           <!-- Auto-execute toggle -->
                                           <button
-                                            title={cmd.autoExecute !== false ? 'Executes command (click to inject only)' : 'Injects text only (click to auto-execute)'}
+                                            data-tooltip={cmd.autoExecute !== false ? 'Executes command with Enter (click to inject text only)' : 'Injects text only (click to auto-execute)'}
+                                            data-tooltip-pos="top-left"
                                             onclick={(e) => { e.stopPropagation(); toggleCommandAutoExecute(connId, project.id, terminal.id, cmd.id); }}
                                             class="shrink-0 w-4 h-4 flex items-center justify-center rounded transition-colors {cmd.autoExecute !== false ? 'text-sky-400 bg-sky-500/20' : 'text-amber-400 bg-amber-500/20'}"
                                           >
@@ -953,7 +998,8 @@
                                           </button>
                                           <!-- Ctrl+C before toggle -->
                                           <button
-                                            title={cmd.sendCtrlCBefore ? 'Sends Ctrl+C before running (click to disable)' : 'Click to send Ctrl+C before running'}
+                                            data-tooltip={cmd.sendCtrlCBefore ? 'Sends Ctrl+C before running (click to disable)' : 'Send Ctrl+C before running'}
+                                            data-tooltip-pos="top-left"
                                             onclick={(e) => { e.stopPropagation(); toggleCommandCtrlCBefore(connId, project.id, terminal.id, cmd.id); }}
                                             class="shrink-0 w-4 h-4 flex items-center justify-center rounded transition-colors {cmd.sendCtrlCBefore ? 'text-rose-400 bg-rose-500/20' : 'text-slate-600 hover:text-slate-400'}"
                                           >
@@ -961,16 +1007,26 @@
                                           </button>
                                           <!-- Run button -->
                                           <button
-                                            title="{cmd.sendCtrlCBefore ? '(Ctrl+C) ' : ''}{cmd.autoExecute !== false ? 'Run' : 'Inject'}: {cmd.command}"
+                                            data-tooltip="{cmd.sendCtrlCBefore ? '(Ctrl+C) ' : ''}{cmd.autoExecute !== false ? 'Execute: ' : 'Inject: '}{cmd.command}"
+                                            data-tooltip-pos="top-left"
                                             onclick={(e) => handleRunCommand(terminal.id, cmd.command, cmd.autoExecute !== false, !!cmd.sendCtrlCBefore, e)}
                                             class="flex-1 text-left truncate text-slate-400 hover:text-white transition-colors px-1"
                                           >
                                             <span class="font-medium text-slate-300">{cmd.label}</span>
                                             <span class="text-slate-600 ml-1">→ {cmd.command}</span>
                                           </button>
+                                          <!-- Duplicate -->
+                                          <div
+                                            role="button" tabindex="0" data-tooltip="Duplicate command shortcut" data-tooltip-pos="top-left"
+                                            onclick={(e) => { e.stopPropagation(); duplicateSavedCommand(connId, project.id, terminal.id, cmd.id); }}
+                                            onkeydown={(e) => e.key === 'Enter' && duplicateSavedCommand(connId, project.id, terminal.id, cmd.id)}
+                                            class="shrink-0 p-0.5 text-slate-600 hover:text-sky-400 rounded hover:bg-sky-500/20 transition-colors opacity-0 group-hover/cmd:opacity-100"
+                                          >
+                                            <svg xmlns="http://www.w3.org/2000/svg" width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                                          </div>
                                           <!-- Edit -->
                                           <div
-                                            role="button" tabindex="0" title="Edit Command"
+                                            role="button" tabindex="0" data-tooltip="Edit command shortcut" data-tooltip-pos="top-left"
                                             onclick={(e) => handleEditCommand(connId, project.id, terminal.id, cmd, e)}
                                             onkeydown={(e) => e.key === 'Enter' && handleEditCommand(connId, project.id, terminal.id, cmd, e)}
                                             class="shrink-0 p-0.5 text-slate-600 hover:text-sky-400 rounded hover:bg-sky-500/20 transition-colors opacity-0 group-hover/cmd:opacity-100"
@@ -979,7 +1035,7 @@
                                           </div>
                                           <!-- Remove -->
                                           <div
-                                            role="button" tabindex="0" title="Remove Command"
+                                            role="button" tabindex="0" data-tooltip="Remove command shortcut" data-tooltip-pos="top-left"
                                             onclick={(e) => { e.stopPropagation(); removeSavedCommand(connId, project.id, terminal.id, cmd.id); }}
                                             onkeydown={(e) => e.key === 'Enter' && removeSavedCommand(connId, project.id, terminal.id, cmd.id)}
                                             class="shrink-0 p-0.5 text-slate-600 hover:text-rose-400 rounded hover:bg-rose-500/20 transition-colors opacity-0 group-hover/cmd:opacity-100"
@@ -1025,21 +1081,21 @@
                       >
                         <button class="w-full flex items-center justify-between px-2 py-1.5 rounded-md text-xs transition-colors hover:bg-white/5 group/pg" onclick={() => toggleProjectGroupCollapse(conn.id, group.id)}>
                           <div class="flex items-center gap-2 overflow-hidden">
-                            <div class="cursor-grab active:cursor-grabbing p-0.5 text-slate-600 hover:text-slate-400 opacity-0 group-hover/pg:opacity-100 transition-opacity">
+                            <div class="cursor-grab active:cursor-grabbing p-0.5 text-slate-600 hover:text-slate-400 opacity-0 group-hover/pg:opacity-100 transition-opacity" data-tooltip="Drag to reorder project group" data-tooltip-pos="bottom-right">
                               <svg xmlns="http://www.w3.org/2000/svg" width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="5" r="1"/><circle cx="9" cy="12" r="1"/><circle cx="9" cy="19" r="1"/><circle cx="15" cy="5" r="1"/><circle cx="15" cy="12" r="1"/><circle cx="15" cy="19" r="1"/></svg>
                             </div>
-                            <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0 text-violet-400 transition-transform {group.collapsed ? '-rotate-90' : ''}"><polyline points="6 9 12 15 18 9"/></svg>
-                            <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0 text-violet-400"><path d="M15.5 17.5H22a2 2 0 0 0 2-2v-8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L11.6 3.4a2 2 0 0 0-1.67-.9H4a2 2 0 0 0-2 2v12.5a2 2 0 0 0 2 2h1.5"/><path d="M5 17.5v3A2 2 0 0 0 7 22.5h15a2 2 0 0 0 2-2v-3"/></svg>
+                            <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0 text-violet-400 transition-transform {group.collapsed ? '-rotate-90' : ''}" data-tooltip={group.collapsed ? 'Expand project group' : 'Collapse project group'} data-tooltip-pos="bottom-right"><polyline points="6 9 12 15 18 9"/></svg>
+                            <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0 text-violet-400" data-tooltip="Project group" data-tooltip-pos="bottom-right"><path d="M15.5 17.5H22a2 2 0 0 0 2-2v-8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L11.6 3.4a2 2 0 0 0-1.67-.9H4a2 2 0 0 0-2 2v12.5a2 2 0 0 0 2 2h1.5"/><path d="M5 17.5v3A2 2 0 0 0 7 22.5h15a2 2 0 0 0 2-2v-3"/></svg>
                             <span class="truncate font-medium text-slate-200">{group.name}</span>
                           </div>
                           <div class="flex items-center gap-1 opacity-0 group-hover/pg:opacity-100 transition-opacity">
-                            <div role="button" tabindex="0" title="Rename Group" onclick={(e) => handleRenameProjectGroup(conn.id, group.id, group.name, e)} onkeydown={(e) => e.key === 'Enter' && handleRenameProjectGroup(conn.id, group.id, group.name, e)} class="p-0.5 text-slate-500 hover:text-sky-400 rounded hover:bg-sky-500/20 transition-colors">
+                            <div role="button" tabindex="0" data-tooltip="Rename group" data-tooltip-pos="bottom-left" onclick={(e) => handleRenameProjectGroup(conn.id, group.id, group.name, e)} onkeydown={(e) => e.key === 'Enter' && handleRenameProjectGroup(conn.id, group.id, group.name, e)} class="p-0.5 text-slate-500 hover:text-sky-400 rounded hover:bg-sky-500/20 transition-colors">
                               <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/></svg>
                             </div>
-                            <div role="button" tabindex="0" title="Add Project" onclick={(e) => { e.stopPropagation(); handleAddProject(conn.id, group.id); }} onkeydown={(e) => e.key === 'Enter' && handleAddProject(conn.id, group.id)} class="p-0.5 text-slate-500 hover:text-emerald-400 rounded hover:bg-emerald-500/20 transition-colors">
+                            <div role="button" tabindex="0" data-tooltip="Add project to group" data-tooltip-pos="bottom-left" onclick={(e) => { e.stopPropagation(); handleAddProject(conn.id, group.id); }} onkeydown={(e) => e.key === 'Enter' && handleAddProject(conn.id, group.id)} class="p-0.5 text-slate-500 hover:text-emerald-400 rounded hover:bg-emerald-500/20 transition-colors">
                               <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
                             </div>
-                            <div role="button" tabindex="0" title="Remove Group" onclick={(e) => handleRemoveProjectGroup(conn.id, group.id, e)} onkeydown={(e) => e.key === 'Enter' && handleRemoveProjectGroup(conn.id, group.id, e)} class="p-0.5 text-slate-500 hover:text-rose-400 rounded hover:bg-rose-500/20 transition-colors">
+                            <div role="button" tabindex="0" data-tooltip="Remove group" data-tooltip-pos="bottom-left" onclick={(e) => handleRemoveProjectGroup(conn.id, group.id, e)} onkeydown={(e) => e.key === 'Enter' && handleRemoveProjectGroup(conn.id, group.id, e)} class="p-0.5 text-slate-500 hover:text-rose-400 rounded hover:bg-rose-500/20 transition-colors">
                               <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
                             </div>
                           </div>
@@ -1081,18 +1137,18 @@
             >
               <button class="w-full flex items-center justify-between px-2 py-1.5 rounded-lg text-xs font-semibold transition-colors hover:bg-white/5 group" onclick={() => toggleGroupCollapse(group.id)}>
                 <div class="flex items-center gap-2 overflow-hidden">
-                  <div class="cursor-grab active:cursor-grabbing p-0.5 text-slate-600 hover:text-slate-400 opacity-0 group-hover:opacity-100 transition-opacity">
+                  <div class="cursor-grab active:cursor-grabbing p-0.5 text-slate-600 hover:text-slate-400 opacity-0 group-hover:opacity-100 transition-opacity" data-tooltip="Drag to reorder group" data-tooltip-pos="bottom-right">
                     <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="5" r="1"/><circle cx="9" cy="12" r="1"/><circle cx="9" cy="19" r="1"/><circle cx="15" cy="5" r="1"/><circle cx="15" cy="12" r="1"/><circle cx="15" cy="19" r="1"/></svg>
                   </div>
-                  <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0 text-indigo-400 transition-transform {group.collapsed ? '-rotate-90' : ''}"><polyline points="6 9 12 15 18 9"/></svg>
-                  <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0 text-indigo-400"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
+                  <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0 text-indigo-400 transition-transform {group.collapsed ? '-rotate-90' : ''}" data-tooltip={group.collapsed ? 'Expand group' : 'Collapse group'} data-tooltip-pos="bottom-right"><polyline points="6 9 12 15 18 9"/></svg>
+                  <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0 text-indigo-400" data-tooltip="Custom terminal group" data-tooltip-pos="bottom-right"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
                   <span class="truncate text-slate-200">{group.name}</span>
                 </div>
                 <div class="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                  <div role="button" tabindex="0" title={gridViewProjectId === group.id ? 'Single View' : 'Grid View'} onclick={(e) => toggleGridView('group', group.id, e)} onkeydown={(e) => e.key === 'Enter' && toggleGridView('group', group.id, e)} class="p-0.5 rounded transition-colors {gridViewProjectId === group.id ? 'text-violet-400 bg-violet-500/20' : 'text-slate-500 hover:text-violet-400 hover:bg-violet-500/20'}">
+                  <div role="button" tabindex="0" data-tooltip={gridViewProjectId === group.id ? 'Switch to single view' : 'Switch to grid view'} data-tooltip-pos="bottom-left" onclick={(e) => toggleGridView('group', group.id, e)} onkeydown={(e) => e.key === 'Enter' && toggleGridView('group', group.id, e)} class="p-0.5 rounded transition-colors {gridViewProjectId === group.id ? 'text-violet-400 bg-violet-500/20' : 'text-slate-500 hover:text-violet-400 hover:bg-violet-500/20'}">
                     <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
                   </div>
-                  <div role="button" tabindex="0" title="Remove Group" onclick={(e) => handleRemoveGroup(group.id, e)} onkeydown={(e) => e.key === 'Enter' && handleRemoveGroup(group.id, e)} class="p-0.5 text-slate-500 hover:text-rose-400 rounded hover:bg-rose-500/20 transition-colors">
+                  <div role="button" tabindex="0" data-tooltip="Remove custom group" data-tooltip-pos="bottom-left" onclick={(e) => handleRemoveGroup(group.id, e)} onkeydown={(e) => e.key === 'Enter' && handleRemoveGroup(group.id, e)} class="p-0.5 text-slate-500 hover:text-rose-400 rounded hover:bg-rose-500/20 transition-colors">
                     <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
                   </div>
                 </div>
@@ -1122,15 +1178,15 @@
                             onclick={() => handleSelectTerminal(terminal.id)}
                           >
                             <div class="flex items-center gap-1.5 overflow-hidden">
-                              <div class="cursor-grab active:cursor-grabbing p-0.5 text-slate-600 hover:text-slate-400 opacity-0 group-hover:opacity-100 transition-opacity">
+                              <div class="cursor-grab active:cursor-grabbing p-0.5 text-slate-600 hover:text-slate-400 opacity-0 group-hover:opacity-100 transition-opacity" data-tooltip="Drag to reorder terminal in group" data-tooltip-pos="bottom-right">
                                 <svg xmlns="http://www.w3.org/2000/svg" width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="5" r="1"/><circle cx="9" cy="12" r="1"/><circle cx="9" cy="19" r="1"/><circle cx="15" cy="5" r="1"/><circle cx="15" cy="12" r="1"/><circle cx="15" cy="19" r="1"/></svg>
                               </div>
-                              <div class={`w-1.5 h-1.5 rounded-full shrink-0 ${!isMounted ? 'bg-slate-600' : (isConn ? 'bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.5)]' : 'bg-rose-500 shadow-[0_0_6px_rgba(244,63,94,0.5)]')}`}></div>
-                              <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+                              <div class={`w-1.5 h-1.5 rounded-full shrink-0 ${!isMounted ? 'bg-slate-600' : (isConn ? 'bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.5)]' : 'bg-rose-500 shadow-[0_0_6px_rgba(244,63,94,0.5)]')}`} data-tooltip={!isMounted ? 'Not initialized' : (isConn ? 'Connected' : 'Disconnected')} data-tooltip-pos="bottom-right"></div>
+                              <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0" data-tooltip="Terminal session" data-tooltip-pos="bottom-right"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
                               <span class="truncate">{terminal.name}</span>
                             </div>
                             <div class="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-all">
-                              <div role="button" tabindex="0" title="Remove from Group" onclick={(e) => handleRemoveTerminalFromGroup(group.id, terminal.id, e)} onkeydown={(e) => e.key === 'Enter' && handleRemoveTerminalFromGroup(group.id, terminal.id, e)} class="p-0.5 text-slate-500 hover:text-rose-400 rounded hover:bg-rose-500/20 transition-colors">
+                              <div role="button" tabindex="0" data-tooltip="Remove terminal from group" data-tooltip-pos="bottom-left" onclick={(e) => handleRemoveTerminalFromGroup(group.id, terminal.id, e)} onkeydown={(e) => e.key === 'Enter' && handleRemoveTerminalFromGroup(group.id, terminal.id, e)} class="p-0.5 text-slate-500 hover:text-rose-400 rounded hover:bg-rose-500/20 transition-colors">
                                 <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
                               </div>
                             </div>
@@ -1157,13 +1213,13 @@
                   onclick={() => handleSelectTerminal(terminal.id)}
                 >
                   <div class="flex items-center gap-1.5 overflow-hidden">
-                    <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0 text-amber-400"><path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"/></svg>
-                    <div class={`w-1.5 h-1.5 rounded-full shrink-0 ${!isMounted ? 'bg-slate-600' : (isConn ? 'bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.5)]' : 'bg-rose-500 shadow-[0_0_6px_rgba(244,63,94,0.5)]')}`}></div>
-                    <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+                    <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0 text-amber-400" data-tooltip="Pinned terminal" data-tooltip-pos="bottom-right"><path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"/></svg>
+                    <div class={`w-1.5 h-1.5 rounded-full shrink-0 ${!isMounted ? 'bg-slate-600' : (isConn ? 'bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.5)]' : 'bg-rose-500 shadow-[0_0_6px_rgba(244,63,94,0.5)]')}`} data-tooltip={!isMounted ? 'Not initialized' : (isConn ? 'Connected' : 'Disconnected')} data-tooltip-pos="bottom-right"></div>
+                    <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0" data-tooltip="Terminal session" data-tooltip-pos="bottom-right"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
                     <span class="truncate">{terminal.name}</span>
                   </div>
                   <div class="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-all">
-                    <div role="button" tabindex="0" title="Unpin" onclick={(e) => { e.stopPropagation(); toggleTerminalPinned(terminal.connId, terminal.projectId, terminal.id); }} onkeydown={(e) => e.key === 'Enter' && toggleTerminalPinned(terminal.connId, terminal.projectId, terminal.id)} class="p-0.5 text-amber-400 hover:text-amber-300 rounded hover:bg-amber-500/20 transition-colors">
+                    <div role="button" tabindex="0" data-tooltip="Unpin terminal" data-tooltip-pos="bottom-left" onclick={(e) => { e.stopPropagation(); toggleTerminalPinned(terminal.connId, terminal.projectId, terminal.id); }} onkeydown={(e) => e.key === 'Enter' && toggleTerminalPinned(terminal.connId, terminal.projectId, terminal.id)} class="p-0.5 text-amber-400 hover:text-amber-300 rounded hover:bg-amber-500/20 transition-colors">
                       <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"/></svg>
                     </div>
                   </div>
@@ -1176,12 +1232,12 @@
 
       <div class="p-3 border-t border-white/5">
         {#if activeSidebarTab === 'connections'}
-          <button onclick={handleAddConnection} class="w-full py-2 border border-slate-700 border-dashed rounded-lg text-slate-400 hover:text-white hover:border-slate-500 hover:bg-white/5 transition-all text-xs flex items-center justify-center gap-2">
+          <button onclick={handleAddConnection} data-tooltip="Add a new server connection" data-tooltip-pos="top" class="w-full py-2 border border-slate-700 border-dashed rounded-lg text-slate-400 hover:text-white hover:border-slate-500 hover:bg-white/5 transition-all text-xs flex items-center justify-center gap-2">
             <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
             Add Connection
           </button>
         {:else if activeSidebarTab === 'groups'}
-          <button onclick={handleAddGroup} class="w-full py-2 border border-indigo-700/50 border-dashed rounded-lg text-indigo-400 hover:text-indigo-300 hover:border-indigo-500 hover:bg-indigo-500/10 transition-all text-xs flex items-center justify-center gap-2">
+          <button onclick={handleAddGroup} data-tooltip="Add a new custom group layout" data-tooltip-pos="top" class="w-full py-2 border border-indigo-700/50 border-dashed rounded-lg text-indigo-400 hover:text-indigo-300 hover:border-indigo-500 hover:bg-indigo-500/10 transition-all text-xs flex items-center justify-center gap-2">
             <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
             Add Group
           </button>
@@ -1242,6 +1298,7 @@
                 pinned={t.pinned}
                 onAddToGroup={() => handleAddToGroupPrompt(t.id)}
                 onTogglePin={() => toggleTerminalPinned(t.connId, t.projectId, t.id)}
+                onDuplicate={() => handleDuplicateTerminal(t.connId, t.projectId, t.id, new CustomEvent('duplicate'))}
               />            </div>
           </div>
         {/if}
