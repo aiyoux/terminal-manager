@@ -2,7 +2,7 @@
 // WebSocket connections live here, independent of component lifecycle.
 // Terminal.svelte attaches/detaches without affecting the connection.
 
-import { getOnConnectCommands } from './stores.svelte';
+import { getOnConnectResolution, setLastOnConnectErrors } from './stores.svelte';
 
 type DataCallback = (data: Uint8Array | string) => void;
 
@@ -128,13 +128,17 @@ export function getOrCreateConnection(
     const initMsg = JSON.stringify({ AuthToken: '', columns: conn.cols, rows: conn.rows });
     ws.send(textEncoder.encode(initMsg));
 
-    // Run user-defined on-connect commands once per connection
+    // Run user-defined on-connect commands once per connection (variables resolved; partial success)
     if (!conn.hasRunOnConnect) {
       conn.hasRunOnConnect = true;
       setTimeout(() => {
-        const commands = getOnConnectCommands(terminalId);
+        const { commands, errors } = getOnConnectResolution(terminalId);
+        setLastOnConnectErrors(terminalId, errors);
         for (const cmd of commands) {
           sendInput(terminalId, cmd + '\n');
+        }
+        if (errors.length) {
+          console.warn('On-connect variable resolution failed', terminalId, errors);
         }
       }, 500);
     }
