@@ -1,5 +1,7 @@
 <script lang="ts">
   import Terminal from '$lib/components/Terminal.svelte';
+  import VariablesEditor from '$lib/components/VariablesEditor.svelte';
+  import TextReplaceModal from '$lib/components/TextReplaceModal.svelte';
   import { closeConnection, sendInput, isConnected, reconnectConnection, connectionStatuses } from '$lib/connectionManager.svelte';
   import {
     getConnections,
@@ -52,12 +54,15 @@
     getGridSettings,
     setGridLayout,
     toggleTerminalPinned,
+    resolveCommandForTerminal,
+    lastOnConnectErrors,
     type Connection,
     type Project,
     type ProjectGroup,
     type TerminalTab,
     type SavedCommand,
     type TerminalGroup,
+    type VariableOwnerRef,
   } from '$lib/stores.svelte';
 
   let connections = $derived(getConnections());
@@ -660,17 +665,49 @@
     updateSavedCommand(connId, projectId, terminalId, cmd.id, result.label, result.command, result.autoExecute, result.sendCtrlCBefore);
   }
 
+  // region: command-run-resolve
   function handleRunCommand(terminalId: string, command: string, autoExecute: boolean, sendCtrlCBefore: boolean, e: Event) {
     e.stopPropagation();
+    // Resolve FIRST — no sendInput (including Ctrl+C) before ok
+    const result = resolveCommandForTerminal(terminalId, command);
+    if (!result.ok) {
+      void showAlert(result.error);
+      return;
+    }
+    const payload = autoExecute ? result.text + '\n' : result.text;
     if (sendCtrlCBefore) {
       sendInput(terminalId, '\x03');
       setTimeout(() => {
-        sendInput(terminalId, autoExecute ? command + '\n' : command);
+        sendInput(terminalId, payload);
       }, 100);
     } else {
-      sendInput(terminalId, autoExecute ? command + '\n' : command);
+      sendInput(terminalId, payload);
     }
   }
+  // endregion: command-run-resolve
+
+  // region: variables-actions
+  let variablesEditorRef = $state<VariableOwnerRef | null>(null);
+  let variablesEditorTitle = $state('Variables');
+  let textReplaceRef = $state<VariableOwnerRef | null>(null);
+
+  function openVariables(ref: VariableOwnerRef, title: string, e?: Event) {
+    e?.stopPropagation();
+    variablesEditorTitle = title;
+    variablesEditorRef = ref;
+  }
+
+  function openTextReplace(ref: VariableOwnerRef, e?: Event) {
+    e?.stopPropagation();
+    textReplaceRef = ref;
+  }
+
+  function onConnectErrorTooltip(terminalId: string): string | undefined {
+    const errs = lastOnConnectErrors[terminalId];
+    if (!errs?.length) return undefined;
+    return errs.map((x) => `On-connect: skipped ${x.label} — ${x.error}`).join('\n');
+  }
+  // endregion: variables-actions
 
   async function handleRenameProject(connId: string, projectId: string, currentName: string, e: Event) {
     e.stopPropagation();
@@ -911,6 +948,12 @@
                   >{conn.name}</span>
                 </div>
                 <div class="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                  <div role="button" tabindex="0" data-tooltip="Edit connection variables" data-tooltip-pos="bottom-left" onclick={(e) => openVariables({ kind: 'connection', connectionId: conn.id }, `Variables · ${conn.name}`, e)} onkeydown={(e) => e.key === 'Enter' && openVariables({ kind: 'connection', connectionId: conn.id }, `Variables · ${conn.name}`)} class="p-0.5 text-slate-500 hover:text-cyan-400 rounded hover:bg-cyan-500/20 transition-colors">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9h16"/><path d="M4 15h16"/><path d="M10 3 8 21"/><path d="m16 3-2 18"/></svg>
+                  </div>
+                  <div role="button" tabindex="0" data-tooltip="Replace in commands" data-tooltip-pos="bottom-left" onclick={(e) => openTextReplace({ kind: 'connection', connectionId: conn.id }, e)} onkeydown={(e) => e.key === 'Enter' && openTextReplace({ kind: 'connection', connectionId: conn.id })} class="p-0.5 text-slate-500 hover:text-fuchsia-400 rounded hover:bg-fuchsia-500/20 transition-colors">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m17 2 4 4-4 4"/><path d="M3 11h18"/><path d="m7 22-4-4 4-4"/><path d="M21 13H3"/></svg>
+                  </div>
                   <div role="button" tabindex="0" data-tooltip="Add project group" data-tooltip-pos="bottom-left" onclick={(e) => { e.stopPropagation(); handleAddProjectGroup(conn.id); }} onkeydown={(e) => e.key === 'Enter' && handleAddProjectGroup(conn.id)} class="p-0.5 text-slate-500 hover:text-violet-400 rounded hover:bg-violet-500/20 transition-colors">
                     <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2v11z"/><line x1="12" y1="11" x2="12" y2="17"/><line x1="9" y1="14" x2="15" y2="14"/></svg>
                   </div>
@@ -963,6 +1006,12 @@
                           >{project.name}</span>
                         </div>
                         <div class="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                          <div role="button" tabindex="0" data-tooltip="Edit project variables" data-tooltip-pos="bottom-left" onclick={(e) => openVariables({ kind: 'project', projectId: project.id }, `Variables · ${project.name}`, e)} onkeydown={(e) => e.key === 'Enter' && openVariables({ kind: 'project', projectId: project.id }, `Variables · ${project.name}`)} class="p-0.5 text-slate-500 hover:text-cyan-400 rounded hover:bg-cyan-500/20 transition-colors">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9h16"/><path d="M4 15h16"/><path d="M10 3 8 21"/><path d="m16 3-2 18"/></svg>
+                          </div>
+                          <div role="button" tabindex="0" data-tooltip="Replace in commands" data-tooltip-pos="bottom-left" onclick={(e) => openTextReplace({ kind: 'project', projectId: project.id }, e)} onkeydown={(e) => e.key === 'Enter' && openTextReplace({ kind: 'project', projectId: project.id })} class="p-0.5 text-slate-500 hover:text-fuchsia-400 rounded hover:bg-fuchsia-500/20 transition-colors">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m17 2 4 4-4 4"/><path d="M3 11h18"/><path d="m7 22-4-4 4-4"/><path d="M21 13H3"/></svg>
+                          </div>
                           <div role="button" tabindex="0" data-tooltip="Rename project" data-tooltip-pos="bottom-left" onclick={(e) => handleRenameProject(connId, project.id, project.name, e)} onkeydown={(e) => e.key === 'Enter' && handleRenameProject(connId, project.id, project.name, e)} class="p-0.5 text-slate-500 hover:text-sky-400 rounded hover:bg-sky-500/20 transition-colors">
                             <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/></svg>
                           </div>
@@ -1026,6 +1075,8 @@
                                   <span
                                     class="truncate select-none cursor-default"
                                     title="Double-click to expand/collapse commands"
+                                    data-tooltip={onConnectErrorTooltip(terminal.id)}
+                                    data-tooltip-pos="bottom-right"
                                     ondblclick={(e) => onTreeLabelDblClick(e, () => toggleTerminalCollapse(connId, project.id, terminal.id))}
                                   >{terminal.name}</span>
                                 </div>
@@ -1048,6 +1099,12 @@
                                       <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.55a11 11 0 0 1 14.08 0"/><path d="M1.42 9a16 16 0 0 1 21.16 0"/><path d="M8.53 16.11a6 6 0 0 1 6.95 0"/><line x1="12" y1="20" x2="12.01" y2="20"/></svg>
                                     </div>
                                   {/if}
+                                  <div role="button" tabindex="0" data-tooltip="Edit terminal variables" data-tooltip-pos="bottom-left" onclick={(e) => openVariables({ kind: 'terminal', terminalId: terminal.id }, `Variables · ${terminal.name}`, e)} onkeydown={(e) => e.key === 'Enter' && openVariables({ kind: 'terminal', terminalId: terminal.id }, `Variables · ${terminal.name}`)} class="p-0.5 text-slate-500 hover:text-cyan-400 rounded hover:bg-cyan-500/20 transition-colors">
+                                    <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9h16"/><path d="M4 15h16"/><path d="M10 3 8 21"/><path d="m16 3-2 18"/></svg>
+                                  </div>
+                                  <div role="button" tabindex="0" data-tooltip="Replace in commands" data-tooltip-pos="bottom-left" onclick={(e) => openTextReplace({ kind: 'terminal', terminalId: terminal.id }, e)} onkeydown={(e) => e.key === 'Enter' && openTextReplace({ kind: 'terminal', terminalId: terminal.id })} class="p-0.5 text-slate-500 hover:text-fuchsia-400 rounded hover:bg-fuchsia-500/20 transition-colors">
+                                    <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m17 2 4 4-4 4"/><path d="M3 11h18"/><path d="m7 22-4-4 4-4"/><path d="M21 13H3"/></svg>
+                                  </div>
                                   <div role="button" tabindex="0" data-tooltip="Duplicate terminal" data-tooltip-pos="bottom-left" onclick={(e) => handleDuplicateTerminal(connId, project.id, terminal.id, e)} onkeydown={(e) => e.key === 'Enter' && handleDuplicateTerminal(connId, project.id, terminal.id, e)} class="p-0.5 text-slate-500 hover:text-sky-400 rounded hover:bg-sky-500/20 transition-colors">
                                     <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
                                   </div>
@@ -1210,6 +1267,12 @@
                             >{group.name}</span>
                           </div>
                           <div class="flex items-center gap-1 opacity-0 group-hover/pg:opacity-100 transition-opacity">
+                            <div role="button" tabindex="0" data-tooltip="Edit project group variables" data-tooltip-pos="bottom-left" onclick={(e) => openVariables({ kind: 'projectGroup', connectionId: conn.id, projectGroupId: group.id }, `Variables · ${group.name}`, e)} onkeydown={(e) => e.key === 'Enter' && openVariables({ kind: 'projectGroup', connectionId: conn.id, projectGroupId: group.id }, `Variables · ${group.name}`)} class="p-0.5 text-slate-500 hover:text-cyan-400 rounded hover:bg-cyan-500/20 transition-colors">
+                              <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9h16"/><path d="M4 15h16"/><path d="M10 3 8 21"/><path d="m16 3-2 18"/></svg>
+                            </div>
+                            <div role="button" tabindex="0" data-tooltip="Replace in commands" data-tooltip-pos="bottom-left" onclick={(e) => openTextReplace({ kind: 'projectGroup', connectionId: conn.id, projectGroupId: group.id }, e)} onkeydown={(e) => e.key === 'Enter' && openTextReplace({ kind: 'projectGroup', connectionId: conn.id, projectGroupId: group.id })} class="p-0.5 text-slate-500 hover:text-fuchsia-400 rounded hover:bg-fuchsia-500/20 transition-colors">
+                              <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m17 2 4 4-4 4"/><path d="M3 11h18"/><path d="m7 22-4-4 4-4"/><path d="M21 13H3"/></svg>
+                            </div>
                             <div role="button" tabindex="0" data-tooltip="Rename group" data-tooltip-pos="bottom-left" onclick={(e) => handleRenameProjectGroup(conn.id, group.id, group.name, e)} onkeydown={(e) => e.key === 'Enter' && handleRenameProjectGroup(conn.id, group.id, group.name, e)} class="p-0.5 text-slate-500 hover:text-sky-400 rounded hover:bg-sky-500/20 transition-colors">
                               <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/></svg>
                             </div>
@@ -1271,6 +1334,12 @@
                   >{group.name}</span>
                 </div>
                 <div class="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                  <div role="button" tabindex="0" data-tooltip="Edit terminal group variables" data-tooltip-pos="bottom-left" onclick={(e) => openVariables({ kind: 'terminalGroup', terminalGroupId: group.id }, `Variables · ${group.name}`, e)} onkeydown={(e) => e.key === 'Enter' && openVariables({ kind: 'terminalGroup', terminalGroupId: group.id }, `Variables · ${group.name}`)} class="p-0.5 text-slate-500 hover:text-cyan-400 rounded hover:bg-cyan-500/20 transition-colors">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9h16"/><path d="M4 15h16"/><path d="M10 3 8 21"/><path d="m16 3-2 18"/></svg>
+                  </div>
+                  <div role="button" tabindex="0" data-tooltip="Replace in commands" data-tooltip-pos="bottom-left" onclick={(e) => openTextReplace({ kind: 'terminalGroup', terminalGroupId: group.id }, e)} onkeydown={(e) => e.key === 'Enter' && openTextReplace({ kind: 'terminalGroup', terminalGroupId: group.id })} class="p-0.5 text-slate-500 hover:text-fuchsia-400 rounded hover:bg-fuchsia-500/20 transition-colors">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m17 2 4 4-4 4"/><path d="M3 11h18"/><path d="m7 22-4-4 4-4"/><path d="M21 13H3"/></svg>
+                  </div>
                   <div role="button" tabindex="0" data-tooltip={gridViewProjectId === group.id ? 'Switch to single view' : 'Switch to grid view'} data-tooltip-pos="bottom-left" onclick={(e) => toggleGridView('group', group.id, e)} onkeydown={(e) => e.key === 'Enter' && toggleGridView('group', group.id, e)} class="p-0.5 rounded transition-colors {gridViewProjectId === group.id ? 'text-violet-400 bg-violet-500/20' : 'text-slate-500 hover:text-violet-400 hover:bg-violet-500/20'}">
                     <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
                   </div>
@@ -1424,6 +1493,7 @@
                 pinned={t.pinned}
                 onAddToGroup={() => handleAddToGroupPrompt(t.id)}
                 onTogglePin={() => toggleTerminalPinned(t.connId, t.projectId, t.id)}
+                onResolveError={(msg) => { void showAlert(msg); }}
               />
             </div>
           </div>
@@ -1560,6 +1630,20 @@
         </div>
       </div>
     </div>
+  {/if}
+
+  {#if variablesEditorRef}
+    <VariablesEditor
+      scopeRef={variablesEditorRef}
+      title={variablesEditorTitle}
+      onClose={() => { variablesEditorRef = null; }}
+    />
+  {/if}
+  {#if textReplaceRef}
+    <TextReplaceModal
+      scopeRef={textReplaceRef}
+      onClose={() => { textReplaceRef = null; }}
+    />
   {/if}
 </div>
 

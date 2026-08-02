@@ -347,11 +347,36 @@ test.describe('Session features regression', () => {
     await page.reload();
     await expect(page.locator('body')).toBeVisible();
 
+    // Wait for IndexedDB load so the terminal exists in store + sidebar
+    await expect
+      .poll(async () => {
+        return page.evaluate(async (name) => {
+          const stores = await import('/src/lib/stores.svelte.ts');
+          if (!stores.isLoaded()) return false;
+          for (const conn of stores.getConnections()) {
+            for (const proj of conn.projects) {
+              if (proj.terminals.some((t: { name: string }) => t.name === name)) return true;
+            }
+            for (const pg of conn.projectGroups || []) {
+              for (const proj of pg.projects) {
+                if (proj.terminals.some((t: { name: string }) => t.name === name)) return true;
+              }
+            }
+          }
+          return false;
+        }, setup!.name);
+      }, { timeout: 10_000 })
+      .toBe(true);
+
     await page.evaluate(async (name) => {
       const stores = await import('/src/lib/stores.svelte.ts');
       for (const conn of stores.getConnections()) {
         if (conn.collapsed) stores.toggleConnectionCollapse(conn.id);
-        for (const proj of conn.projects) {
+        const projects = [
+          ...conn.projects,
+          ...(conn.projectGroups || []).flatMap((g: { projects: typeof conn.projects }) => g.projects),
+        ];
+        for (const proj of projects) {
           if (proj.collapsed) stores.toggleProjectCollapse(conn.id, proj.id);
           for (const term of proj.terminals) {
             if (term.name === name) {
@@ -363,11 +388,10 @@ test.describe('Session features regression', () => {
       }
     }, setup!.name);
 
-    // Click terminal in sidebar to ensure mounted
+    // Click terminal in sidebar to ensure mounted (and trigger handleSelectTerminal)
     const termRow = page.locator('button', { hasText: setup!.name }).first();
-    if (await termRow.isVisible()) {
-      await termRow.click();
-    }
+    await expect(termRow).toBeVisible({ timeout: 10_000 });
+    await termRow.click();
 
     // Terminal window gear
     const gear = page.getByRole('button', { name: 'Command shortcut settings' }).first();

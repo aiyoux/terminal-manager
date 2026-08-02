@@ -2,6 +2,20 @@
 // Persisted to IndexedDB
 
 import { loadConnections, saveConnections, loadTerminalGroups, saveTerminalGroups, loadGridSettings, saveGridSettings } from './db';
+import {
+  type NodeVariables,
+  type ResolveResult,
+  sanitizeVariables,
+  isValidUserKey,
+  isDangerousKey,
+  buildContextVars,
+  buildScopeMap,
+  resolveTemplate,
+  countKeyReferences,
+} from './variables';
+import { applyLiteralReplace, countLiteralOccurrences } from './commandTextReplace';
+
+export type { NodeVariables, ResolveResult };
 
 export interface SavedCommand {
   id: string;
@@ -22,6 +36,7 @@ export interface TerminalTab {
   collapsed: boolean;
   gridHidden?: boolean; // New prop to hide from grid views
   pinned?: boolean;
+  variables?: NodeVariables;
   // Legacy compat: startupCommand is derived from savedCommands
 }
 
@@ -30,6 +45,7 @@ export interface Project {
   name: string;
   terminals: TerminalTab[];
   collapsed: boolean;
+  variables?: NodeVariables;
 }
 
 export interface ProjectGroup {
@@ -37,6 +53,7 @@ export interface ProjectGroup {
   name: string;
   projects: Project[];
   collapsed: boolean;
+  variables?: NodeVariables;
 }
 
 export interface Connection {
@@ -46,6 +63,7 @@ export interface Connection {
   projects: Project[];
   projectGroups?: ProjectGroup[];
   collapsed: boolean;
+  variables?: NodeVariables;
 }
 
 export interface TerminalGroup {
@@ -53,6 +71,7 @@ export interface TerminalGroup {
   name: string;
   terminalIds: string[];
   collapsed: boolean;
+  variables?: NodeVariables;
 }
 
 export interface GridSettings {
@@ -89,7 +108,36 @@ function migrateTerminal(t: any): TerminalTab {
     delete t.startupCommand;
   }
   if (t.collapsed === undefined) t.collapsed = true;
+  t.variables = sanitizeVariables(t.variables);
   return t as TerminalTab;
+}
+
+function normalizeProject(proj: Project) {
+  proj.variables = sanitizeVariables(proj.variables);
+  proj.terminals = (proj.terminals || []).map((t) => migrateTerminal(t));
+}
+
+/** Single walk for load + import — all five variable owner kinds. */
+export function normalizeState(
+  conns: Connection[],
+  groups: TerminalGroup[]
+): { connections: Connection[]; terminalGroups: TerminalGroup[] } {
+  for (const conn of conns) {
+    conn.variables = sanitizeVariables(conn.variables);
+    conn.projects = conn.projects || [];
+    conn.projectGroups = conn.projectGroups || [];
+    for (const proj of conn.projects) normalizeProject(proj);
+    for (const pg of conn.projectGroups) {
+      pg.variables = sanitizeVariables(pg.variables);
+      pg.projects = pg.projects || [];
+      for (const proj of pg.projects) normalizeProject(proj);
+    }
+  }
+  for (const g of groups) {
+    g.variables = sanitizeVariables(g.variables);
+    g.terminalIds = Array.isArray(g.terminalIds) ? g.terminalIds : [];
+  }
+  return { connections: conns, terminalGroups: groups };
 }
 
 /** Deep-clone saved commands with fresh IDs so duplicated terminals stay independent. */
@@ -139,30 +187,16 @@ if (typeof window !== 'undefined') {
     loadTerminalGroups<TerminalGroup[]>(),
     loadGridSettings<GridSettings>()
   ]).then(([connData, groupData, gridData]) => {
-    if (connData) {
-      // Run migration
-      for (const conn of connData) {
-        conn.projects = conn.projects || [];
-        conn.projectGroups = conn.projectGroups || [];
-        for (const proj of conn.projects) {
-          proj.terminals = proj.terminals.map(migrateTerminal);
-        }
-        for (const pg of conn.projectGroups) {
-          pg.projects = pg.projects || [];
-          for (const proj of pg.projects) {
-            proj.terminals = proj.terminals.map(migrateTerminal);
-          }
-        }
-      }
-      const reIded = ensureUniqueCommandIds(connData);
-      connections = connData;
+    const conns = connData ?? [];
+    const groups = groupData ?? [];
+    if (connData || groupData) {
+      normalizeState(conns, groups);
+      const reIded = ensureUniqueCommandIds(conns);
+      connections = conns;
+      terminalGroups = groups;
       if (reIded) {
-        // Persist repaired IDs from prior shallow terminal duplicates
         saveConnections($state.snapshot(connections));
       }
-    }
-    if (groupData) {
-      terminalGroups = groupData;
     }
     if (gridData) {
       gridSettings = gridData;
@@ -207,17 +241,16 @@ export function importState(json: string): boolean {
       if (!Array.isArray(conn.projects) || !Array.isArray(conn.projectGroups)) return false;
       for (const proj of conn.projects) {
         if (!proj.id || !proj.name || !Array.isArray(proj.terminals)) return false;
-        proj.terminals = proj.terminals.map(migrateTerminal);
       }
       for (const pg of conn.projectGroups) {
         if (!pg.id || !pg.name || !Array.isArray(pg.projects)) return false;
         for (const proj of pg.projects) {
           if (!proj.id || !proj.name || !Array.isArray(proj.terminals)) return false;
-          proj.terminals = proj.terminals.map(migrateTerminal);
         }
       }
     }
 
+    normalizeState(conns, groups);
     ensureUniqueCommandIds(conns);
     connections = conns;
     terminalGroups = groups;
@@ -355,7 +388,8 @@ export function addTerminalGroup(name: string) {
     id: uid(),
     name,
     terminalIds: [],
-    collapsed: false
+    collapsed: false,
+    variables: {},
   });
   saveGroups();
 }
@@ -417,6 +451,7 @@ export function addConnection(name: string, wsUrl: string): Connection {
     wsUrl,
     projects: [],
     collapsed: false,
+    variables: {},
   };
   connections.push(conn);
   save();
@@ -449,7 +484,8 @@ export function addProject(connId: string, name: string, groupId?: string): Proj
     id: uid(),
     name,
     terminals: [],
-    collapsed: false
+    collapsed: false,
+    variables: {},
   };
 
   if (groupId) {
@@ -509,6 +545,7 @@ export function addTerminal(connId: string, projectId: string, name: string): Te
     fontSize: 14,
     savedCommands: [],
     collapsed: true,
+    variables: {},
   };
   found.project.terminals.push(terminal);
   activeTerminalId = terminal.id;
@@ -533,6 +570,7 @@ export function duplicateTerminal(connId: string, projectId: string, terminalId:
     collapsed: source.collapsed ?? true,
     pinned: source.pinned ?? false,
     gridHidden: source.gridHidden ?? false,
+    variables: { ...(source.variables ?? {}) },
   };
 
   const idx = found.project.terminals.findIndex(t => t.id === terminalId);
@@ -693,12 +731,47 @@ export function toggleCommandOnConnect(connId: string, projectId: string, termin
   }
 }
 
-export function getOnConnectCommands(terminalId: string): string[] {
+/** Module-level map for UI; updated on each on-connect attempt (mutate only — do not reassign). */
+export const lastOnConnectErrors = $state<Record<string, { label: string; error: string }[]>>({});
+
+export function setLastOnConnectErrors(terminalId: string, errors: { label: string; error: string }[]) {
+  lastOnConnectErrors[terminalId] = errors;
+}
+
+export function getLastOnConnectErrors(terminalId: string): { label: string; error: string }[] {
+  return lastOnConnectErrors[terminalId] ?? [];
+}
+
+function collectOnConnectResolution(terminalId: string): {
+  commands: string[];
+  errors: { label: string; error: string }[];
+} {
   const found = findTerminalById(terminalId);
-  if (!found) return [];
-  return found.terminal.savedCommands
-    .filter(c => c.isOnConnect)
-    .map(c => c.command);
+  if (!found) return { commands: [], errors: [] };
+  const commands: string[] = [];
+  const errors: { label: string; error: string }[] = [];
+  for (const c of found.terminal.savedCommands.filter((x) => x.isOnConnect)) {
+    const r = resolveCommandForTerminal(terminalId, c.command);
+    if (r.ok) commands.push(r.text);
+    else errors.push({ label: c.label, error: r.error });
+  }
+  return { commands, errors };
+}
+
+/** Successfully resolved on-connect command texts only (partial success). */
+export function getOnConnectCommands(terminalId: string): string[] {
+  return collectOnConnectResolution(terminalId).commands;
+}
+
+export function getOnConnectResolutionErrors(
+  terminalId: string
+): { label: string; error: string }[] {
+  return collectOnConnectResolution(terminalId).errors;
+}
+
+/** Single walk for connectionManager. */
+export function getOnConnectResolution(terminalId: string) {
+  return collectOnConnectResolution(terminalId);
 }
 
 // Legacy compat
@@ -722,7 +795,8 @@ export function addProjectGroup(connId: string, name: string): ProjectGroup | nu
     id: uid(),
     name,
     projects: [],
-    collapsed: false
+    collapsed: false,
+    variables: {},
   };
   conn.projectGroups.push(group);
   save();
@@ -830,17 +904,42 @@ export function findProjectById(projectId: string): { conn: Connection; group: P
   return null;
 }
 
-export function findTerminalById(terminalId: string): { conn: Connection; project: Project; terminal: TerminalTab } | null {
+export interface TerminalAncestry {
+  conn: Connection;
+  projectGroup: ProjectGroup | null;
+  project: Project;
+  terminal: TerminalTab;
+  /** Groups that list this terminal, in global terminalGroups order */
+  terminalGroups: TerminalGroup[];
+}
+
+export function findTerminalAncestry(terminalId: string): TerminalAncestry | null {
   for (const conn of connections) {
     for (const project of conn.projects) {
       const terminal = project.terminals.find(t => t.id === terminalId);
-      if (terminal) return { conn, project, terminal };
+      if (terminal) {
+        return {
+          conn,
+          projectGroup: null,
+          project,
+          terminal,
+          terminalGroups: terminalGroups.filter(g => g.terminalIds.includes(terminalId)),
+        };
+      }
     }
     if (conn.projectGroups) {
-      for (const group of conn.projectGroups) {
-        for (const project of group.projects) {
+      for (const projectGroup of conn.projectGroups) {
+        for (const project of projectGroup.projects) {
           const terminal = project.terminals.find(t => t.id === terminalId);
-          if (terminal) return { conn, project, terminal };
+          if (terminal) {
+            return {
+              conn,
+              projectGroup,
+              project,
+              terminal,
+              terminalGroups: terminalGroups.filter(g => g.terminalIds.includes(terminalId)),
+            };
+          }
         }
       }
     }
@@ -848,7 +947,465 @@ export function findTerminalById(terminalId: string): { conn: Connection; projec
   return null;
 }
 
+export function findTerminalById(terminalId: string): { conn: Connection; project: Project; terminal: TerminalTab } | null {
+  const a = findTerminalAncestry(terminalId);
+  return a ? { conn: a.conn, project: a.project, terminal: a.terminal } : null;
+}
+
 export function getWsUrlForTerminal(terminalId: string): string | null {
   const found = findTerminalById(terminalId);
   return found?.conn.wsUrl ?? null;
+}
+
+// --- Hierarchical Variables ---
+
+export type VariableOwnerKind =
+  | 'connection'
+  | 'projectGroup'
+  | 'project'
+  | 'terminal'
+  | 'terminalGroup';
+
+export type VariableOwnerRef =
+  | { kind: 'connection'; connectionId: string }
+  | { kind: 'projectGroup'; connectionId: string; projectGroupId: string }
+  | { kind: 'project'; projectId: string }
+  | { kind: 'terminal'; terminalId: string }
+  | { kind: 'terminalGroup'; terminalGroupId: string };
+
+export interface VariableSourceEntry {
+  key: string;
+  value: string;
+  source:
+    | { kind: 'connection'; id: string; name: string }
+    | { kind: 'projectGroup'; id: string; name: string }
+    | { kind: 'project'; id: string; name: string }
+    | { kind: 'terminalGroup'; id: string; name: string }
+    | { kind: 'terminal'; id: string; name: string }
+    | { kind: 'context' };
+}
+
+function getOwnerNode(ref: VariableOwnerRef): { variables: NodeVariables; saveFn: () => void } | null {
+  switch (ref.kind) {
+    case 'connection': {
+      const conn = connections.find(c => c.id === ref.connectionId);
+      if (!conn) return null;
+      if (!conn.variables) conn.variables = {};
+      return { variables: conn.variables, saveFn: save };
+    }
+    case 'projectGroup': {
+      const conn = connections.find(c => c.id === ref.connectionId);
+      const pg = conn?.projectGroups?.find(g => g.id === ref.projectGroupId);
+      if (!pg) return null;
+      if (!pg.variables) pg.variables = {};
+      return { variables: pg.variables, saveFn: save };
+    }
+    case 'project': {
+      const found = findProjectById(ref.projectId);
+      if (!found) return null;
+      if (!found.project.variables) found.project.variables = {};
+      return { variables: found.project.variables, saveFn: save };
+    }
+    case 'terminal': {
+      const found = findTerminalById(ref.terminalId);
+      if (!found) return null;
+      if (!found.terminal.variables) found.terminal.variables = {};
+      return { variables: found.terminal.variables, saveFn: save };
+    }
+    case 'terminalGroup': {
+      const g = terminalGroups.find(x => x.id === ref.terminalGroupId);
+      if (!g) return null;
+      if (!g.variables) g.variables = {};
+      return { variables: g.variables, saveFn: saveGroups };
+    }
+  }
+}
+
+export function getOwnVariables(ref: VariableOwnerRef): NodeVariables {
+  const node = getOwnerNode(ref);
+  if (!node) return {};
+  return { ...node.variables };
+}
+
+export function setVariable(
+  ref: VariableOwnerRef,
+  key: string,
+  value: string
+): { ok: true } | { ok: false; error: string } {
+  if (!isValidUserKey(key) || isDangerousKey(key)) {
+    return { ok: false, error: `Invalid variable key: ${key}` };
+  }
+  if (typeof value !== 'string') {
+    return { ok: false, error: 'Variable value must be a string' };
+  }
+  const node = getOwnerNode(ref);
+  if (!node) return { ok: false, error: 'Owner not found' };
+  node.variables[key] = value;
+  node.saveFn();
+  return { ok: true };
+}
+
+export function removeVariable(ref: VariableOwnerRef, key: string): void {
+  const node = getOwnerNode(ref);
+  if (!node) return;
+  delete node.variables[key];
+  node.saveFn();
+}
+
+export function renameVariableKey(
+  ref: VariableOwnerRef,
+  oldKey: string,
+  newKey: string
+): { ok: true; referenceCount: number } | { ok: false; error: string } {
+  if (!isValidUserKey(newKey) || isDangerousKey(newKey)) {
+    return { ok: false, error: `Invalid variable key: ${newKey}` };
+  }
+  const node = getOwnerNode(ref);
+  if (!node) return { ok: false, error: 'Owner not found' };
+  if (!(oldKey in node.variables)) {
+    return { ok: false, error: `Key not found: ${oldKey}` };
+  }
+  if (oldKey !== newKey && newKey in node.variables) {
+    return { ok: false, error: `Key already exists: ${newKey}` };
+  }
+  const referenceCount = countVariableReferencesInScope(ref, oldKey);
+  const val = node.variables[oldKey];
+  delete node.variables[oldKey];
+  node.variables[newKey] = val;
+  node.saveFn();
+  return { ok: true, referenceCount };
+}
+
+export function ancestryToLayers(a: TerminalAncestry): NodeVariables[] {
+  const layers: NodeVariables[] = [a.conn.variables ?? {}];
+  if (a.projectGroup) layers.push(a.projectGroup.variables ?? {});
+  layers.push(a.project.variables ?? {});
+  for (const g of a.terminalGroups) layers.push(g.variables ?? {});
+  layers.push(a.terminal.variables ?? {});
+  return layers;
+}
+
+export function ancestryToContextSource(a: TerminalAncestry) {
+  return {
+    terminalName: a.terminal.name,
+    terminalId: a.terminal.id,
+    tmuxSession: a.terminal.tmuxSession,
+    workingDir: a.terminal.workingDir || '',
+    projectName: a.project.name,
+    projectId: a.project.id,
+    projectGroupName: a.projectGroup?.name ?? '',
+    projectGroupId: a.projectGroup?.id ?? '',
+    connectionName: a.conn.name,
+    connectionId: a.conn.id,
+    connectionWsUrl: a.conn.wsUrl,
+  };
+}
+
+export function getEffectiveVariablesForTerminal(terminalId: string): Map<string, string> | null {
+  const a = findTerminalAncestry(terminalId);
+  if (!a) return null;
+  return buildScopeMap(ancestryToLayers(a), buildContextVars(ancestryToContextSource(a)));
+}
+
+export function resolveCommandForTerminal(
+  terminalId: string,
+  commandTemplate: string
+): ResolveResult {
+  const scope = getEffectiveVariablesForTerminal(terminalId);
+  if (!scope) {
+    return {
+      ok: false,
+      error: 'Unresolved variable(s): (terminal not found)',
+      errorKind: 'unresolved',
+      unresolved: [],
+    };
+  }
+  return resolveTemplate(commandTemplate, scope);
+}
+
+export function getInheritedVariableEntries(ref: VariableOwnerRef): VariableSourceEntry[] {
+  const entries: VariableSourceEntry[] = [];
+  const pushLayer = (
+    vars: NodeVariables | undefined,
+    source: VariableSourceEntry['source']
+  ) => {
+    for (const [key, value] of Object.entries(vars ?? {})) {
+      entries.push({ key, value, source });
+    }
+  };
+
+  switch (ref.kind) {
+    case 'connection':
+    case 'terminalGroup':
+      return [];
+    case 'projectGroup': {
+      const conn = connections.find(c => c.id === ref.connectionId);
+      if (conn) pushLayer(conn.variables, { kind: 'connection', id: conn.id, name: conn.name });
+      return entries;
+    }
+    case 'project': {
+      const found = findProjectById(ref.projectId);
+      if (!found) return [];
+      pushLayer(found.conn.variables, { kind: 'connection', id: found.conn.id, name: found.conn.name });
+      if (found.group) {
+        pushLayer(found.group.variables, { kind: 'projectGroup', id: found.group.id, name: found.group.name });
+      }
+      return entries;
+    }
+    case 'terminal': {
+      const a = findTerminalAncestry(ref.terminalId);
+      if (!a) return [];
+      pushLayer(a.conn.variables, { kind: 'connection', id: a.conn.id, name: a.conn.name });
+      if (a.projectGroup) {
+        pushLayer(a.projectGroup.variables, {
+          kind: 'projectGroup',
+          id: a.projectGroup.id,
+          name: a.projectGroup.name,
+        });
+      }
+      pushLayer(a.project.variables, { kind: 'project', id: a.project.id, name: a.project.name });
+      for (const g of a.terminalGroups) {
+        pushLayer(g.variables, { kind: 'terminalGroup', id: g.id, name: g.name });
+      }
+      return entries;
+    }
+  }
+}
+
+export function getEffectiveVariableEntries(terminalId: string): VariableSourceEntry[] {
+  const a = findTerminalAncestry(terminalId);
+  if (!a) return [];
+  const entries = getInheritedVariableEntries({ kind: 'terminal', terminalId });
+  for (const [key, value] of Object.entries(a.terminal.variables ?? {})) {
+    entries.push({
+      key,
+      value,
+      source: { kind: 'terminal', id: a.terminal.id, name: a.terminal.name },
+    });
+  }
+  const ctx = buildContextVars(ancestryToContextSource(a));
+  for (const [key, value] of Object.entries(ctx)) {
+    entries.push({ key, value, source: { kind: 'context' } });
+  }
+  return entries;
+}
+
+/** Enumerate terminals whose commands are in rewrite scope for ref. */
+export function terminalsInRewriteScope(scopeRef: VariableOwnerRef): TerminalAncestry[] {
+  const out: TerminalAncestry[] = [];
+  const visit = (terminalId: string) => {
+    const a = findTerminalAncestry(terminalId);
+    if (a) out.push(a);
+  };
+
+  switch (scopeRef.kind) {
+    case 'connection': {
+      const conn = connections.find(c => c.id === scopeRef.connectionId);
+      if (!conn) return [];
+      for (const p of conn.projects) for (const t of p.terminals) visit(t.id);
+      for (const pg of conn.projectGroups || []) {
+        for (const p of pg.projects) for (const t of p.terminals) visit(t.id);
+      }
+      break;
+    }
+    case 'projectGroup': {
+      const conn = connections.find(c => c.id === scopeRef.connectionId);
+      const pg = conn?.projectGroups?.find(g => g.id === scopeRef.projectGroupId);
+      if (!pg) return [];
+      for (const p of pg.projects) for (const t of p.terminals) visit(t.id);
+      break;
+    }
+    case 'project': {
+      const found = findProjectById(scopeRef.projectId);
+      if (!found) return [];
+      for (const t of found.project.terminals) visit(t.id);
+      break;
+    }
+    case 'terminal': {
+      visit(scopeRef.terminalId);
+      break;
+    }
+    case 'terminalGroup': {
+      const g = terminalGroups.find(x => x.id === scopeRef.terminalGroupId);
+      if (!g) return [];
+      for (const id of g.terminalIds) visit(id);
+      break;
+    }
+  }
+  return out;
+}
+
+export function terminalInRewriteScope(scopeRef: VariableOwnerRef, terminalId: string): boolean {
+  return terminalsInRewriteScope(scopeRef).some(a => a.terminal.id === terminalId);
+}
+
+export function countVariableReferencesInScope(ref: VariableOwnerRef, key: string): number {
+  let count = 0;
+  for (const a of terminalsInRewriteScope(ref)) {
+    for (const cmd of a.terminal.savedCommands || []) {
+      count += countKeyReferences(cmd.command, key);
+    }
+  }
+  return count;
+}
+
+// --- Text replacement ---
+
+export interface TextReplaceMatch {
+  terminalId: string;
+  terminalName: string;
+  commandId: string;
+  commandLabel: string;
+  before: string;
+  after: string;
+}
+
+export interface TextReplacePreview {
+  ok: true;
+  find: string;
+  mode: 'literal' | 'toVariable';
+  replaceAll: boolean;
+  variableKey?: string;
+  scopeRef: VariableOwnerRef;
+  ensureVariable: boolean;
+  ensureValue?: string;
+  matches: TextReplaceMatch[];
+  skipped: { commandId: string; terminalId: string; reason: string }[];
+  totalMatchCount: number;
+}
+
+export type TextReplacePreviewResult =
+  | TextReplacePreview
+  | { ok: false; error: string };
+
+function inScopeForToVariable(
+  terminalId: string,
+  key: string,
+  ensureVariable: boolean,
+  scopeRef: VariableOwnerRef
+): boolean {
+  const effective = getEffectiveVariablesForTerminal(terminalId);
+  if (effective?.has(key)) return true;
+  if (ensureVariable && terminalInRewriteScope(scopeRef, terminalId)) {
+    return true;
+  }
+  return false;
+}
+
+export function previewCommandTextReplace(options: {
+  scopeRef: VariableOwnerRef;
+  find: string;
+  mode: 'literal' | 'toVariable';
+  replace?: string;
+  replaceAll?: boolean;
+  variableKey?: string;
+  ensureVariable?: boolean;
+  requireInScope?: boolean;
+}): TextReplacePreviewResult {
+  const {
+    scopeRef,
+    find,
+    mode,
+    replace = '',
+    replaceAll = true,
+    variableKey,
+    ensureVariable = false,
+    requireInScope = true,
+  } = options;
+
+  if (!find) {
+    return { ok: false, error: 'Find string must not be empty' };
+  }
+
+  let replacement = replace;
+  if (mode === 'toVariable') {
+    if (!variableKey) {
+      return { ok: false, error: 'variableKey is required for toVariable mode' };
+    }
+    if (!isValidUserKey(variableKey) || isDangerousKey(variableKey)) {
+      return { ok: false, error: `Invalid variable key: ${variableKey}` };
+    }
+    replacement = `\${${variableKey}}`;
+  }
+
+  const matches: TextReplaceMatch[] = [];
+  const skipped: { commandId: string; terminalId: string; reason: string }[] = [];
+  let totalMatchCount = 0;
+
+  for (const a of terminalsInRewriteScope(scopeRef)) {
+    for (const cmd of a.terminal.savedCommands || []) {
+      const occ = countLiteralOccurrences(cmd.command, find);
+      if (occ === 0) continue;
+
+      if (mode === 'toVariable' && requireInScope) {
+        const key = variableKey!;
+        if (!inScopeForToVariable(a.terminal.id, key, ensureVariable, scopeRef)) {
+          skipped.push({
+            commandId: cmd.id,
+            terminalId: a.terminal.id,
+            reason: `Variable ${key} not in scope`,
+          });
+          continue;
+        }
+      }
+
+      totalMatchCount += occ;
+      const after = applyLiteralReplace(cmd.command, find, replacement, replaceAll);
+      matches.push({
+        terminalId: a.terminal.id,
+        terminalName: a.terminal.name,
+        commandId: cmd.id,
+        commandLabel: cmd.label,
+        before: cmd.command,
+        after,
+      });
+    }
+  }
+
+  return {
+    ok: true,
+    find,
+    mode,
+    replaceAll,
+    variableKey: mode === 'toVariable' ? variableKey : undefined,
+    scopeRef,
+    ensureVariable: mode === 'toVariable' ? ensureVariable : false,
+    ensureValue: mode === 'toVariable' && ensureVariable ? find : undefined,
+    matches,
+    skipped,
+    totalMatchCount,
+  };
+}
+
+export function applyCommandTextReplace(preview: TextReplacePreview): {
+  applied: number;
+  skippedStale: number;
+  ensured: boolean;
+} {
+  let applied = 0;
+  let skippedStale = 0;
+  let ensured = false;
+
+  if (preview.ensureVariable && preview.variableKey && preview.ensureValue !== undefined) {
+    const r = setVariable(preview.scopeRef, preview.variableKey, preview.ensureValue);
+    ensured = r.ok;
+  }
+
+  for (const m of preview.matches) {
+    const found = findTerminalById(m.terminalId);
+    if (!found) {
+      skippedStale += 1;
+      continue;
+    }
+    const cmd = found.terminal.savedCommands.find(c => c.id === m.commandId);
+    if (!cmd || cmd.command !== m.before) {
+      skippedStale += 1;
+      continue;
+    }
+    cmd.command = m.after;
+    applied += 1;
+  }
+
+  if (applied > 0 || ensured) save();
+  return { applied, skippedStale, ensured };
 }

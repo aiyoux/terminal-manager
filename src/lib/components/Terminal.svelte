@@ -11,10 +11,10 @@
     connectionStatuses,
     reconnectConnection,
   } from '$lib/connectionManager.svelte';
-  import { updateTerminalFontSize, type SavedCommand } from '$lib/stores.svelte';
+  import { updateTerminalFontSize, resolveCommandForTerminal, type SavedCommand } from '$lib/stores.svelte';
   import CommandShortcutsPanel from './CommandShortcutsPanel.svelte';
 
-  let { wsUrl, title = "Terminal", tmuxSession = '', workingDir = '', terminalId = '', fontSize = 14, connId = '', projectId = '', savedCommands = [], pinned = false, onAddToGroup, onTogglePin }: {
+  let { wsUrl, title = "Terminal", tmuxSession = '', workingDir = '', terminalId = '', fontSize = 14, connId = '', projectId = '', savedCommands = [], pinned = false, onAddToGroup, onTogglePin, onResolveError }: {
     wsUrl: string;
     title?: string;
     tmuxSession?: string;
@@ -27,6 +27,8 @@
     pinned?: boolean;
     onAddToGroup?: () => void;
     onTogglePin?: () => void;
+    /** Called when variable resolution fails (fail-closed; no send). */
+    onResolveError?: (message: string) => void;
   } = $props();
 
   let settingsOpen = $state(false);
@@ -233,13 +235,20 @@
   }
 
   function runCommand(command: string, autoExecute: boolean = true, sendCtrlCBefore: boolean = false) {
+    // Resolve FIRST — no sendInput (including Ctrl+C) before ok
+    const result = resolveCommandForTerminal(terminalId, command);
+    if (!result.ok) {
+      onResolveError?.(result.error);
+      return;
+    }
+    const payload = autoExecute ? result.text + '\n' : result.text;
     if (sendCtrlCBefore) {
       sendInput(terminalId, '\x03'); // Ctrl+C
       setTimeout(() => {
-        sendInput(terminalId, autoExecute ? command + '\n' : command);
+        sendInput(terminalId, payload);
       }, 100);
     } else {
-      sendInput(terminalId, autoExecute ? command + '\n' : command);
+      sendInput(terminalId, payload);
     }
   }
 </script>
