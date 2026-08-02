@@ -289,6 +289,8 @@
     options?: { id: string; name: string }[];
     autoExecute?: boolean;
     sendCtrlCBefore?: boolean;
+    confirmLabel?: string;
+    destructive?: boolean;
     resolve: ((val: any) => void) | null;
   }>({
     isOpen: false,
@@ -302,6 +304,8 @@
     options: [],
     autoExecute: true,
     sendCtrlCBefore: false,
+    confirmLabel: 'Confirm',
+    destructive: false,
     resolve: null
   });
 
@@ -365,18 +369,36 @@
     });
   }
 
-  async function showConfirm(message: string): Promise<boolean> {
+  type ConfirmOptions = {
+    title?: string;
+    confirmLabel?: string;
+    destructive?: boolean;
+  };
+
+  /** Shared confirmation modal (not window.confirm). Used by all sidebar deletes. */
+  async function showConfirm(message: string, options: ConfirmOptions = {}): Promise<boolean> {
+    const destructive = options.destructive ?? false;
     return new Promise((resolve) => {
       dialogState = {
         isOpen: true,
         type: 'confirm',
-        title: 'Confirm',
+        title: options.title ?? 'Confirm',
         message,
         value: '',
         placeholder: '',
+        confirmLabel: options.confirmLabel ?? (destructive ? 'Delete' : 'Confirm'),
+        destructive,
         resolve
       };
+      setTimeout(() => {
+        document.getElementById('dialog-confirm-btn')?.focus();
+      }, 10);
     });
+  }
+
+  /** DRY helper for destructive sidebar removals. */
+  async function confirmDelete(message: string, title: string): Promise<boolean> {
+    return showConfirm(message, { title, destructive: true, confirmLabel: 'Delete' });
   }
 
   async function showAlert(message: string): Promise<void> {
@@ -423,6 +445,13 @@
     dialogState.isOpen = false;
   }
 
+  function handleDialogKeydown(e: KeyboardEvent) {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      handleDialogCancel();
+    }
+  }
+
   async function handleAddConnection() {
     const wsUrl = await showPrompt('WebSocket URL (e.g., ws://localhost:7681):', 'ws://localhost:7681');
     if (!wsUrl) return;
@@ -437,17 +466,17 @@
 
   async function handleRemoveGroup(groupId: string, e: Event) {
     e.stopPropagation();
-    if (await showConfirm('Remove this group? Terminals will not be deleted.')) {
-      removeTerminalGroup(groupId);
-      if (gridViewConnId === 'group' && gridViewProjectId === groupId) {
-        gridViewConnId = '';
-        gridViewProjectId = '';
-      }
+    if (!(await confirmDelete('Remove this group? Terminals will not be deleted.', 'Remove group'))) return;
+    removeTerminalGroup(groupId);
+    if (gridViewConnId === 'group' && gridViewProjectId === groupId) {
+      gridViewConnId = '';
+      gridViewProjectId = '';
     }
   }
 
-  function handleRemoveTerminalFromGroup(groupId: string, terminalId: string, e: Event) {
+  async function handleRemoveTerminalFromGroup(groupId: string, terminalId: string, e: Event) {
     e.stopPropagation();
+    if (!(await confirmDelete('Remove this terminal from the group? The terminal itself will not be deleted.', 'Remove from group'))) return;
     removeTerminalFromGroup(groupId, terminalId);
   }
 
@@ -492,9 +521,8 @@
 
   async function handleRemoveProjectGroup(connId: string, groupId: string, e: Event) {
     e.stopPropagation();
-    if (await showConfirm('Remove this project group and all its projects/terminals?')) {
-      removeProjectGroup(connId, groupId);
-    }
+    if (!(await confirmDelete('Remove this project group and all its projects/terminals?', 'Remove project group'))) return;
+    removeProjectGroup(connId, groupId);
   }
 
   async function handleAddTerminal(connId: string, projectId: string) {
@@ -504,23 +532,28 @@
 
   async function handleRemoveConnection(connId: string, e: Event) {
     e.stopPropagation();
-    if (await showConfirm('Remove this connection and all its projects/terminals?')) {
-      removeConnection(connId);
-    }
+    if (!(await confirmDelete('Remove this connection and all its projects/terminals?', 'Remove connection'))) return;
+    removeConnection(connId);
   }
 
   async function handleRemoveProject(connId: string, projectId: string, e: Event) {
     e.stopPropagation();
-    if (await showConfirm('Remove this project and all its terminals?')) {
-      removeProject(connId, projectId);
-    }
+    if (!(await confirmDelete('Remove this project and all its terminals?', 'Remove project'))) return;
+    removeProject(connId, projectId);
   }
 
-  function handleRemoveTerminal(connId: string, projectId: string, terminalId: string, e: Event) {
+  async function handleRemoveTerminal(connId: string, projectId: string, terminalId: string, e: Event) {
     e.stopPropagation();
+    if (!(await confirmDelete('Remove this terminal? Its connection will be closed.', 'Remove terminal'))) return;
     removeTerminal(connId, projectId, terminalId);
     mountedTerminalIds.delete(terminalId);
     mountedTerminalIds = new Set(mountedTerminalIds);
+  }
+
+  async function handleRemoveSavedCommand(connId: string, projectId: string, terminalId: string, cmdId: string, e: Event) {
+    e.stopPropagation();
+    if (!(await confirmDelete('Remove this command shortcut?', 'Remove command'))) return;
+    removeSavedCommand(connId, projectId, terminalId, cmdId);
   }
 
   function handleDuplicateTerminal(connId: string, projectId: string, terminalId: string, e: Event) {
@@ -1036,8 +1069,8 @@
                                           <!-- Remove -->
                                           <div
                                             role="button" tabindex="0" data-tooltip="Remove command shortcut" data-tooltip-pos="top-left"
-                                            onclick={(e) => { e.stopPropagation(); removeSavedCommand(connId, project.id, terminal.id, cmd.id); }}
-                                            onkeydown={(e) => e.key === 'Enter' && removeSavedCommand(connId, project.id, terminal.id, cmd.id)}
+                                            onclick={(e) => handleRemoveSavedCommand(connId, project.id, terminal.id, cmd.id, e)}
+                                            onkeydown={(e) => e.key === 'Enter' && handleRemoveSavedCommand(connId, project.id, terminal.id, cmd.id, e)}
                                             class="shrink-0 p-0.5 text-slate-600 hover:text-rose-400 rounded hover:bg-rose-500/20 transition-colors opacity-0 group-hover/cmd:opacity-100"
                                           >
                                             <svg xmlns="http://www.w3.org/2000/svg" width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
@@ -1319,10 +1352,21 @@
 
   <!-- Dialog -->
   {#if dialogState.isOpen}
-    <div class="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/80 backdrop-blur-sm">
-      <div class="bg-slate-900 border border-white/10 rounded-xl shadow-2xl w-full max-w-sm overflow-hidden">
+    <div
+      class="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/80 backdrop-blur-sm"
+      role="presentation"
+      onclick={(e) => { if (e.target === e.currentTarget) handleDialogCancel(); }}
+      onkeydown={handleDialogKeydown}
+    >
+      <div
+        class="bg-slate-900 border border-white/10 rounded-xl shadow-2xl w-full max-w-sm overflow-hidden"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="dialog-title"
+        tabindex="-1"
+      >
         <div class="p-4 border-b border-white/5">
-          <h3 class="text-sm font-semibold text-slate-200">{dialogState.title}</h3>
+          <h3 id="dialog-title" class="text-sm font-semibold text-slate-200">{dialogState.title}</h3>
         </div>
         <div class="p-4">
           {#if dialogState.type === 'prompt'}
@@ -1399,6 +1443,7 @@
         <div class="p-4 bg-slate-950/50 flex items-center justify-end gap-2">
           {#if dialogState.type !== 'alert'}
             <button
+              type="button"
               onclick={handleDialogCancel}
               class="px-3 py-1.5 rounded-lg text-xs font-semibold text-slate-400 hover:text-slate-200 hover:bg-white/5 transition-all"
             >
@@ -1406,10 +1451,18 @@
             </button>
           {/if}
           <button
+            type="button"
+            id="dialog-confirm-btn"
             onclick={handleDialogSubmit}
-            class="px-3 py-1.5 rounded-lg text-xs font-semibold text-white bg-sky-500 hover:bg-sky-400 shadow-lg shadow-sky-500/20 transition-all"
+            class="px-3 py-1.5 rounded-lg text-xs font-semibold text-white shadow-lg transition-all {dialogState.destructive
+              ? 'bg-rose-500 hover:bg-rose-400 shadow-rose-500/20'
+              : 'bg-sky-500 hover:bg-sky-400 shadow-sky-500/20'}"
           >
-            {dialogState.type === 'prompt' || dialogState.type === 'command-prompt' ? 'Save' : (dialogState.type === 'confirm' ? 'Confirm' : 'OK')}
+            {dialogState.type === 'prompt' || dialogState.type === 'command-prompt'
+              ? 'Save'
+              : dialogState.type === 'confirm'
+                ? (dialogState.confirmLabel || 'Confirm')
+                : 'OK'}
           </button>
         </div>
       </div>
