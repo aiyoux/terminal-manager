@@ -12,8 +12,9 @@
     reconnectConnection,
   } from '$lib/connectionManager.svelte';
   import { updateTerminalFontSize, type SavedCommand } from '$lib/stores.svelte';
+  import CommandShortcutsPanel from './CommandShortcutsPanel.svelte';
 
-  let { wsUrl, title = "Terminal", tmuxSession = '', workingDir = '', terminalId = '', fontSize = 14, connId = '', projectId = '', savedCommands = [], pinned = false, onAddToGroup, onTogglePin, onDuplicate }: {
+  let { wsUrl, title = "Terminal", tmuxSession = '', workingDir = '', terminalId = '', fontSize = 14, connId = '', projectId = '', savedCommands = [], pinned = false, onAddToGroup, onTogglePin }: {
     wsUrl: string;
     title?: string;
     tmuxSession?: string;
@@ -26,8 +27,31 @@
     pinned?: boolean;
     onAddToGroup?: () => void;
     onTogglePin?: () => void;
-    onDuplicate?: () => void;
   } = $props();
+
+  let settingsOpen = $state(false);
+  let settingsBtnEl: HTMLButtonElement | null = $state(null);
+
+  function toggleSettings(e: MouseEvent) {
+    e.stopPropagation();
+    settingsOpen = !settingsOpen;
+  }
+
+  function handleWindowPointerDown(e: PointerEvent) {
+    if (!settingsOpen) return;
+    const target = e.target as Node | null;
+    if (!target) return;
+    // Keep open when interacting inside the popover or gear button
+    const popover = document.getElementById(`cmd-settings-${terminalId}`);
+    if (popover?.contains(target) || settingsBtnEl?.contains(target)) return;
+    settingsOpen = false;
+  }
+
+  function handleWindowKeydown(e: KeyboardEvent) {
+    if (e.key === 'Escape' && settingsOpen) {
+      settingsOpen = false;
+    }
+  }
 
   let terminalContainer: HTMLElement;
   let term: any;
@@ -149,12 +173,17 @@
       resizeTimeout = setTimeout(safeFit, 150);
     });
     resizeObserver.observe(terminalContainer);
+
+    window.addEventListener('pointerdown', handleWindowPointerDown, true);
+    window.addEventListener('keydown', handleWindowKeydown);
   });
 
   onDestroy(() => {
     if (unsubscribe) unsubscribe();
     if (term) term.dispose();
     if (resizeObserver) resizeObserver.disconnect();
+    window.removeEventListener('pointerdown', handleWindowPointerDown, true);
+    window.removeEventListener('keydown', handleWindowKeydown);
   });
 
   function handleReconnect() {
@@ -215,25 +244,95 @@
   }
 </script>
 
-<div class="flex flex-col h-full w-full bg-slate-900 overflow-hidden rounded-xl border border-slate-700/50 shadow-2xl relative group">
-  <div class="flex items-center justify-between px-4 py-2 bg-slate-800 border-b border-slate-700 z-10 shrink-0">
-    <div class="flex items-center gap-2 overflow-hidden mr-2">
+<div class="flex flex-col h-full w-full bg-slate-900 rounded-xl border border-slate-700/50 shadow-2xl relative group">
+  <div class="flex items-center justify-between px-4 py-2 bg-slate-800 border-b border-slate-700 z-20 shrink-0 rounded-t-xl">
+    <div class="flex items-center gap-2 min-w-0 mr-2">
       <div class={`w-2.5 h-2.5 rounded-full shrink-0 ${connected ? 'bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.6)]' : 'bg-rose-500'}`}></div>
-      <span class="text-xs font-medium text-slate-300 tracking-wide select-none truncate shrink-0">{title}</span>
+      <span class="text-xs font-medium text-slate-300 tracking-wide select-none truncate shrink-0 max-w-[10rem]">{title}</span>
       
       <!-- Quick Actions -->
-      {#if savedCommands.length > 0}
-        <div class="flex items-center gap-1 ml-2 overflow-x-auto no-scrollbar py-0.5">
-          {#each savedCommands as cmd}
-            <button
-              onclick={() => runCommand(cmd.command, cmd.autoExecute !== false, !!cmd.sendCtrlCBefore)}
-              class="px-2 py-0.5 rounded bg-slate-700/50 hover:bg-slate-600 text-[9px] font-semibold text-slate-300 hover:text-white transition-all whitespace-nowrap border border-white/5 {cmd.autoExecute === false ? 'border-l-2 border-l-amber-500/50' : ''} {cmd.sendCtrlCBefore ? 'border-r-2 border-r-rose-500/50' : ''}"
-              data-tooltip="{cmd.sendCtrlCBefore ? '(Ctrl+C) ' : ''}{cmd.autoExecute === false ? 'Inject: ' : 'Run: '}{cmd.command}"
-              data-tooltip-pos="bottom"
+      {#if connId && projectId && terminalId}
+        <div class="relative flex items-center gap-1 ml-2 min-w-0">
+          {#if savedCommands.length > 0}
+            <div class="flex items-center gap-1 overflow-x-auto no-scrollbar py-0.5 min-w-0">
+              {#each savedCommands as cmd}
+                {@const autoExec = cmd.autoExecute !== false}
+                {@const ctrlC = !!cmd.sendCtrlCBefore}
+                {@const onConnect = !!cmd.isOnConnect}
+                <button
+                  type="button"
+                  onclick={() => runCommand(cmd.command, autoExec, ctrlC)}
+                  class="inline-flex items-center gap-1 pl-1.5 pr-2 py-0.5 rounded-md text-[9px] font-semibold whitespace-nowrap border transition-all
+                    {ctrlC
+                      ? 'bg-rose-500/15 border-rose-500/35 text-rose-200 hover:bg-rose-500/25'
+                      : !autoExec
+                        ? 'bg-amber-500/15 border-amber-500/35 text-amber-200 hover:bg-amber-500/25'
+                        : onConnect
+                          ? 'bg-emerald-500/15 border-emerald-500/35 text-emerald-200 hover:bg-emerald-500/25'
+                          : 'bg-sky-500/15 border-sky-500/35 text-sky-200 hover:bg-sky-500/25'}"
+                  data-tooltip="{ctrlC ? '(Ctrl+C) ' : ''}{autoExec ? 'Run: ' : 'Inject: '}{cmd.command}"
+                  data-tooltip-pos="bottom-right"
+                >
+                  <span class="inline-flex items-center gap-0.5 shrink-0">
+                    {#if onConnect}
+                      <span class="text-emerald-400" title="Auto-run on connect">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+                      </span>
+                    {/if}
+                    {#if autoExec}
+                      <span class="text-sky-400" title="Hit Enter">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+                      </span>
+                    {:else}
+                      <span class="text-amber-400" title="Inject only">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="8" height="8" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M9 9h6"/><path d="M9 15h4"/></svg>
+                      </span>
+                    {/if}
+                    {#if ctrlC}
+                      <span class="text-rose-400" title="Ctrl+C first">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+                      </span>
+                    {/if}
+                  </span>
+                  {cmd.label}
+                </button>
+              {/each}
+            </div>
+          {/if}
+
+          <button
+            bind:this={settingsBtnEl}
+            type="button"
+            onclick={toggleSettings}
+            class="shrink-0 p-1 rounded transition-colors {settingsOpen ? 'text-sky-400 bg-sky-500/15' : 'text-slate-500 hover:text-slate-200 hover:bg-slate-700/80'}"
+            aria-label="Command shortcut settings"
+            aria-expanded={settingsOpen}
+            aria-haspopup="dialog"
+            data-tooltip="Manage command shortcuts"
+            data-tooltip-pos="bottom-right"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
+          </button>
+
+          {#if settingsOpen}
+            <div
+              id="cmd-settings-{terminalId}"
+              role="dialog"
+              tabindex="-1"
+              aria-label="Command shortcut settings"
+              class="absolute left-0 top-full mt-1.5 z-50 p-3 rounded-xl border border-white/10 bg-slate-900 shadow-2xl shadow-black/50"
             >
-              {cmd.label}
-            </button>
-          {/each}
+              <CommandShortcutsPanel
+                {connId}
+                {projectId}
+                {terminalId}
+                {savedCommands}
+                onRun={(command, autoExecute, sendCtrlCBefore) => {
+                  runCommand(command, autoExecute, sendCtrlCBefore);
+                }}
+              />
+            </div>
+          {/if}
         </div>
       {/if}
     </div>
@@ -260,18 +359,6 @@
           data-tooltip-pos="bottom-left"
         >
           <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill={pinned ? 'currentColor' : 'none'} stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"/></svg>
-        </button>
-      {/if}
-
-      {#if onDuplicate}
-        <button
-          onclick={onDuplicate}
-          class="text-slate-400 hover:text-sky-400 p-1 rounded hover:bg-slate-700 transition-colors"
-          aria-label="Duplicate terminal"
-          data-tooltip="Duplicate terminal"
-          data-tooltip-pos="bottom-left"
-        >
-          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
         </button>
       {/if}
 
@@ -313,7 +400,7 @@
     </div>
   </div>
 
-  <div class="flex-1 p-2 min-h-0 overflow-hidden bg-[#0f172a] relative" style="contain: layout paint; isolation: isolate;">
+  <div class="flex-1 p-2 min-h-0 overflow-hidden bg-[#0f172a] relative rounded-b-xl" style="contain: layout paint; isolation: isolate;">
     <div
       class="h-full w-full"
       bind:this={terminalContainer}

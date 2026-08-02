@@ -572,7 +572,7 @@ export function updateTerminalFontSize(connId: string, projectId: string, termin
 
 // --- Saved Command CRUD ---
 
-export function addSavedCommand(connId: string, projectId: string, terminalId: string, label: string, command: string, autoExecute: boolean = true, sendCtrlCBefore: boolean = false): SavedCommand | null {
+export function addSavedCommand(connId: string, projectId: string, terminalId: string, label: string, command: string, autoExecute: boolean = true, sendCtrlCBefore: boolean = false, isOnConnect: boolean = false): SavedCommand | null {
   const terminal = findTerminalById(terminalId)?.terminal;
   if (!terminal) return null;
 
@@ -580,7 +580,7 @@ export function addSavedCommand(connId: string, projectId: string, terminalId: s
     id: uid(),
     label,
     command,
-    isOnConnect: false,
+    isOnConnect,
     autoExecute,
     sendCtrlCBefore,
   };
@@ -598,7 +598,7 @@ export function removeSavedCommand(connId: string, projectId: string, terminalId
   save();
 }
 
-export function updateSavedCommand(connId: string, projectId: string, terminalId: string, cmdId: string, newLabel: string, newCommand: string, autoExecute?: boolean, sendCtrlCBefore?: boolean) {
+export function updateSavedCommand(connId: string, projectId: string, terminalId: string, cmdId: string, newLabel: string, newCommand: string, autoExecute?: boolean, sendCtrlCBefore?: boolean, isOnConnect?: boolean) {
   const terminal = findTerminalById(terminalId)?.terminal;
   if (!terminal) return;
 
@@ -608,6 +608,7 @@ export function updateSavedCommand(connId: string, projectId: string, terminalId
     cmd.command = newCommand;
     if (autoExecute !== undefined) cmd.autoExecute = autoExecute;
     if (sendCtrlCBefore !== undefined) cmd.sendCtrlCBefore = sendCtrlCBefore;
+    if (isOnConnect !== undefined) cmd.isOnConnect = isOnConnect;
     save();
   }
 }

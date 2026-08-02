@@ -67,6 +67,47 @@
 
   let activeSidebarTab = $state<'connections' | 'groups' | 'pinned'>('connections');
 
+  // --- Sidebar view settings ---
+  const VIEW_SETTINGS_KEY = 'terminal-dashboard-view-settings';
+  /** When true, show auto-run / hit-enter / ctrl+c icons on command rows in the tree. Default hidden. */
+  let showCommandActionIcons = $state(false);
+
+  function setShowCommandActionIcons(value: boolean) {
+    showCommandActionIcons = value;
+    try {
+      localStorage.setItem(VIEW_SETTINGS_KEY, JSON.stringify({ showCommandActionIcons: value }));
+    } catch {
+      // ignore
+    }
+  }
+
+  /** Double-click a tree label to expand/collapse (same as chevron). Stops the parent row click. */
+  function onTreeLabelDblClick(e: MouseEvent, toggle: () => void) {
+    e.preventDefault();
+    e.stopPropagation();
+    toggle();
+  }
+
+  /** Stop label clicks from bubbling so a double-click does not fire the row handler twice. */
+  function onTreeLabelClick(e: MouseEvent) {
+    e.stopPropagation();
+  }
+
+  // Restore view settings once on client
+  if (typeof window !== 'undefined') {
+    try {
+      const raw = localStorage.getItem(VIEW_SETTINGS_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw) as { showCommandActionIcons?: boolean };
+        if (typeof parsed.showCommandActionIcons === 'boolean') {
+          showCommandActionIcons = parsed.showCommandActionIcons;
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }
+
   // --- Drag and Drop ---
   let draggedItem = $state<{ type: 'connection' | 'project' | 'project-group' | 'terminal' | 'command' | 'group' | 'group-terminal'; id: string; index: number; connId?: string; projectId?: string; terminalId?: string; groupId?: string } | null>(null);
   let dragOverItem = $state<{ type: string; id: string; index: number } | null>(null);
@@ -803,6 +844,31 @@
         </button>
       </div>
 
+      <!-- View settings (below tabs, above section labels) -->
+      <div class="flex items-center justify-between gap-2 px-3 py-2 border-b border-white/5 bg-slate-950/80">
+        <span class="text-[9px] font-bold uppercase tracking-widest text-slate-600">View</span>
+        <button
+          type="button"
+          role="switch"
+          aria-checked={showCommandActionIcons}
+          aria-label="Show command action icons in tree"
+          data-tooltip="Show or hide auto-run, hit Enter, and Ctrl+C icons on command shortcuts in the tree"
+          data-tooltip-pos="bottom-left"
+          onclick={() => setShowCommandActionIcons(!showCommandActionIcons)}
+          class="flex items-center gap-2 cursor-pointer select-none group/view"
+        >
+          <span class="text-[10px] text-slate-500 group-hover/view:text-slate-300 transition-colors">Command action icons</span>
+          <span
+            class="relative w-8 h-4 rounded-full transition-colors {showCommandActionIcons ? 'bg-sky-500' : 'bg-slate-700'}"
+            aria-hidden="true"
+          >
+            <span
+              class="absolute top-0.5 left-0.5 w-3 h-3 rounded-full bg-white shadow transition-transform {showCommandActionIcons ? 'translate-x-4' : 'translate-x-0'}"
+            ></span>
+          </span>
+        </button>
+      </div>
+
       <div class="p-3 flex-1 min-h-0 overflow-y-auto">
         {#if activeSidebarTab === 'connections'}
           <div class="text-[10px] font-bold uppercase tracking-widest text-slate-500 mb-3 px-2">Connections</div>
@@ -836,7 +902,12 @@
                   </div>
                   <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0 text-sky-400 transition-transform {conn.collapsed ? '-rotate-90' : ''}" data-tooltip={conn.collapsed ? 'Expand connection' : 'Collapse connection'} data-tooltip-pos="bottom-right"><polyline points="6 9 12 15 18 9"/></svg>
                   <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0 text-sky-400" data-tooltip="Server connection" data-tooltip-pos="bottom-right"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
-                  <span class="truncate text-slate-200">{conn.name}</span>
+                  <span
+                    class="truncate text-slate-200 select-none cursor-default"
+                    title="Double-click to expand/collapse"
+                    onclick={onTreeLabelClick}
+                    ondblclick={(e) => onTreeLabelDblClick(e, () => toggleConnectionCollapse(conn.id))}
+                  >{conn.name}</span>
                 </div>
                 <div class="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
                   <div role="button" tabindex="0" data-tooltip="Add project group" data-tooltip-pos="bottom-left" onclick={(e) => { e.stopPropagation(); handleAddProjectGroup(conn.id); }} onkeydown={(e) => e.key === 'Enter' && handleAddProjectGroup(conn.id)} class="p-0.5 text-slate-500 hover:text-violet-400 rounded hover:bg-violet-500/20 transition-colors">
@@ -883,7 +954,12 @@
                           </div>
                           <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0 text-amber-400 transition-transform {project.collapsed ? '-rotate-90' : ''}" data-tooltip={project.collapsed ? 'Expand project' : 'Collapse project'} data-tooltip-pos="bottom-right"><polyline points="6 9 12 15 18 9"/></svg>
                           <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0 text-amber-400" data-tooltip="Project workspace" data-tooltip-pos="bottom-right"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
-                          <span class="truncate text-slate-300">{project.name}</span>
+                          <span
+                            class="truncate text-slate-300 select-none cursor-default"
+                            title="Double-click to expand/collapse"
+                            onclick={onTreeLabelClick}
+                            ondblclick={(e) => onTreeLabelDblClick(e, () => toggleProjectCollapse(connId, project.id))}
+                          >{project.name}</span>
                         </div>
                         <div class="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
                           <div role="button" tabindex="0" data-tooltip="Rename project" data-tooltip-pos="bottom-left" onclick={(e) => handleRenameProject(connId, project.id, project.name, e)} onkeydown={(e) => e.key === 'Enter' && handleRenameProject(connId, project.id, project.name, e)} class="p-0.5 text-slate-500 hover:text-sky-400 rounded hover:bg-sky-500/20 transition-colors">
@@ -946,7 +1022,11 @@
                                   </div>
                                   <div class={`w-1.5 h-1.5 rounded-full shrink-0 ${!isMounted ? 'bg-slate-600' : (isConn ? 'bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.5)]' : 'bg-rose-500 shadow-[0_0_6px_rgba(244,63,94,0.5)]')}`} data-tooltip={!isMounted ? 'Not initialized' : (isConn ? 'Connected' : 'Disconnected')} data-tooltip-pos="bottom-right"></div>
                                   <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0" data-tooltip="Terminal session" data-tooltip-pos="bottom-right"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
-                                  <span class="truncate">{terminal.name}</span>
+                                  <span
+                                    class="truncate select-none cursor-default"
+                                    title="Double-click to expand/collapse commands"
+                                    ondblclick={(e) => onTreeLabelDblClick(e, () => toggleTerminalCollapse(connId, project.id, terminal.id))}
+                                  >{terminal.name}</span>
                                 </div>
                                 <div class="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-all">
                                   <div role="button" tabindex="0" data-tooltip={terminal.gridHidden ? 'Show in grid view' : 'Hide from grid view'} data-tooltip-pos="bottom-left" onclick={(e) => { e.stopPropagation(); toggleTerminalGridHidden(connId, project.id, terminal.id); }} onkeydown={(e) => e.key === 'Enter' && toggleTerminalGridHidden(connId, project.id, terminal.id)} class="p-0.5 rounded transition-colors {terminal.gridHidden ? 'text-slate-600 hover:text-slate-400' : 'text-sky-400 bg-sky-500/10 hover:bg-sky-500/20'}">
@@ -1011,33 +1091,35 @@
                                           <div class="cursor-grab active:cursor-grabbing p-0.5 text-slate-700 hover:text-slate-500 opacity-0 group-hover/cmd:opacity-100 transition-opacity" data-tooltip="Drag to reorder or move command to another terminal" data-tooltip-pos="bottom-right">
                                             <svg xmlns="http://www.w3.org/2000/svg" width="7" height="7" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="5" r="1"/><circle cx="9" cy="12" r="1"/><circle cx="9" cy="19" r="1"/><circle cx="15" cy="5" r="1"/><circle cx="15" cy="12" r="1"/><circle cx="15" cy="19" r="1"/></svg>
                                           </div>
-                                          <!-- On-connect toggle -->
-                                          <button
-                                            data-tooltip={cmd.isOnConnect ? 'Auto-run on connect (click to disable)' : 'Auto-run on connect (click to enable)'}
-                                            data-tooltip-pos="top-left"
-                                            onclick={(e) => { e.stopPropagation(); toggleCommandOnConnect(connId, project.id, terminal.id, cmd.id); }}
-                                            class="shrink-0 w-4 h-4 flex items-center justify-center rounded transition-colors {cmd.isOnConnect ? 'text-emerald-400 bg-emerald-500/20' : 'text-slate-600 hover:text-slate-400'}"
-                                          >
-                                            <svg xmlns="http://www.w3.org/2000/svg" width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-                                          </button>
-                                          <!-- Auto-execute toggle -->
-                                          <button
-                                            data-tooltip={cmd.autoExecute !== false ? 'Executes command with Enter (click to inject text only)' : 'Injects text only (click to auto-execute)'}
-                                            data-tooltip-pos="top-left"
-                                            onclick={(e) => { e.stopPropagation(); toggleCommandAutoExecute(connId, project.id, terminal.id, cmd.id); }}
-                                            class="shrink-0 w-4 h-4 flex items-center justify-center rounded transition-colors {cmd.autoExecute !== false ? 'text-sky-400 bg-sky-500/20' : 'text-amber-400 bg-amber-500/20'}"
-                                          >
-                                            <svg xmlns="http://www.w3.org/2000/svg" width="8" height="8" viewBox="0 0 24 24" fill={cmd.autoExecute !== false ? 'none' : 'currentColor'} stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">{#if cmd.autoExecute !== false}<polygon points="5 3 19 12 5 21 5 3"/>{:else}<rect x="4" y="4" width="16" height="16" rx="2"/><path d="M9 9h6"/><path d="M9 15h4"/>{/if}</svg>
-                                          </button>
-                                          <!-- Ctrl+C before toggle -->
-                                          <button
-                                            data-tooltip={cmd.sendCtrlCBefore ? 'Sends Ctrl+C before running (click to disable)' : 'Send Ctrl+C before running'}
-                                            data-tooltip-pos="top-left"
-                                            onclick={(e) => { e.stopPropagation(); toggleCommandCtrlCBefore(connId, project.id, terminal.id, cmd.id); }}
-                                            class="shrink-0 w-4 h-4 flex items-center justify-center rounded transition-colors {cmd.sendCtrlCBefore ? 'text-rose-400 bg-rose-500/20' : 'text-slate-600 hover:text-slate-400'}"
-                                          >
-                                            <svg xmlns="http://www.w3.org/2000/svg" width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
-                                          </button>
+                                          {#if showCommandActionIcons}
+                                            <!-- On-connect toggle -->
+                                            <button
+                                              data-tooltip={cmd.isOnConnect ? 'Auto-run on connect (click to disable)' : 'Auto-run on connect (click to enable)'}
+                                              data-tooltip-pos="top-left"
+                                              onclick={(e) => { e.stopPropagation(); toggleCommandOnConnect(connId, project.id, terminal.id, cmd.id); }}
+                                              class="shrink-0 w-4 h-4 flex items-center justify-center rounded transition-colors {cmd.isOnConnect ? 'text-emerald-400 bg-emerald-500/20' : 'text-slate-600 hover:text-slate-400'}"
+                                            >
+                                              <svg xmlns="http://www.w3.org/2000/svg" width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+                                            </button>
+                                            <!-- Auto-execute toggle -->
+                                            <button
+                                              data-tooltip={cmd.autoExecute !== false ? 'Executes command with Enter (click to inject text only)' : 'Injects text only (click to auto-execute)'}
+                                              data-tooltip-pos="top-left"
+                                              onclick={(e) => { e.stopPropagation(); toggleCommandAutoExecute(connId, project.id, terminal.id, cmd.id); }}
+                                              class="shrink-0 w-4 h-4 flex items-center justify-center rounded transition-colors {cmd.autoExecute !== false ? 'text-sky-400 bg-sky-500/20' : 'text-amber-400 bg-amber-500/20'}"
+                                            >
+                                              <svg xmlns="http://www.w3.org/2000/svg" width="8" height="8" viewBox="0 0 24 24" fill={cmd.autoExecute !== false ? 'none' : 'currentColor'} stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">{#if cmd.autoExecute !== false}<polygon points="5 3 19 12 5 21 5 3"/>{:else}<rect x="4" y="4" width="16" height="16" rx="2"/><path d="M9 9h6"/><path d="M9 15h4"/>{/if}</svg>
+                                            </button>
+                                            <!-- Ctrl+C before toggle -->
+                                            <button
+                                              data-tooltip={cmd.sendCtrlCBefore ? 'Sends Ctrl+C before running (click to disable)' : 'Send Ctrl+C before running'}
+                                              data-tooltip-pos="top-left"
+                                              onclick={(e) => { e.stopPropagation(); toggleCommandCtrlCBefore(connId, project.id, terminal.id, cmd.id); }}
+                                              class="shrink-0 w-4 h-4 flex items-center justify-center rounded transition-colors {cmd.sendCtrlCBefore ? 'text-rose-400 bg-rose-500/20' : 'text-slate-600 hover:text-slate-400'}"
+                                            >
+                                              <svg xmlns="http://www.w3.org/2000/svg" width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+                                            </button>
+                                          {/if}
                                           <!-- Run button -->
                                           <button
                                             data-tooltip="{cmd.sendCtrlCBefore ? '(Ctrl+C) ' : ''}{cmd.autoExecute !== false ? 'Execute: ' : 'Inject: '}{cmd.command}"
@@ -1119,7 +1201,12 @@
                             </div>
                             <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0 text-violet-400 transition-transform {group.collapsed ? '-rotate-90' : ''}" data-tooltip={group.collapsed ? 'Expand project group' : 'Collapse project group'} data-tooltip-pos="bottom-right"><polyline points="6 9 12 15 18 9"/></svg>
                             <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0 text-violet-400" data-tooltip="Project group" data-tooltip-pos="bottom-right"><path d="M15.5 17.5H22a2 2 0 0 0 2-2v-8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L11.6 3.4a2 2 0 0 0-1.67-.9H4a2 2 0 0 0-2 2v12.5a2 2 0 0 0 2 2h1.5"/><path d="M5 17.5v3A2 2 0 0 0 7 22.5h15a2 2 0 0 0 2-2v-3"/></svg>
-                            <span class="truncate font-medium text-slate-200">{group.name}</span>
+                            <span
+                              class="truncate font-medium text-slate-200 select-none cursor-default"
+                              title="Double-click to expand/collapse"
+                              onclick={onTreeLabelClick}
+                              ondblclick={(e) => onTreeLabelDblClick(e, () => toggleProjectGroupCollapse(conn.id, group.id))}
+                            >{group.name}</span>
                           </div>
                           <div class="flex items-center gap-1 opacity-0 group-hover/pg:opacity-100 transition-opacity">
                             <div role="button" tabindex="0" data-tooltip="Rename group" data-tooltip-pos="bottom-left" onclick={(e) => handleRenameProjectGroup(conn.id, group.id, group.name, e)} onkeydown={(e) => e.key === 'Enter' && handleRenameProjectGroup(conn.id, group.id, group.name, e)} class="p-0.5 text-slate-500 hover:text-sky-400 rounded hover:bg-sky-500/20 transition-colors">
@@ -1175,7 +1262,12 @@
                   </div>
                   <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0 text-indigo-400 transition-transform {group.collapsed ? '-rotate-90' : ''}" data-tooltip={group.collapsed ? 'Expand group' : 'Collapse group'} data-tooltip-pos="bottom-right"><polyline points="6 9 12 15 18 9"/></svg>
                   <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0 text-indigo-400" data-tooltip="Custom terminal group" data-tooltip-pos="bottom-right"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
-                  <span class="truncate text-slate-200">{group.name}</span>
+                  <span
+                    class="truncate text-slate-200 select-none cursor-default"
+                    title="Double-click to expand/collapse"
+                    onclick={onTreeLabelClick}
+                    ondblclick={(e) => onTreeLabelDblClick(e, () => toggleGroupCollapse(group.id))}
+                  >{group.name}</span>
                 </div>
                 <div class="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
                   <div role="button" tabindex="0" data-tooltip={gridViewProjectId === group.id ? 'Switch to single view' : 'Switch to grid view'} data-tooltip-pos="bottom-left" onclick={(e) => toggleGridView('group', group.id, e)} onkeydown={(e) => e.key === 'Enter' && toggleGridView('group', group.id, e)} class="p-0.5 rounded transition-colors {gridViewProjectId === group.id ? 'text-violet-400 bg-violet-500/20' : 'text-slate-500 hover:text-violet-400 hover:bg-violet-500/20'}">
@@ -1331,8 +1423,8 @@
                 pinned={t.pinned}
                 onAddToGroup={() => handleAddToGroupPrompt(t.id)}
                 onTogglePin={() => toggleTerminalPinned(t.connId, t.projectId, t.id)}
-                onDuplicate={() => handleDuplicateTerminal(t.connId, t.projectId, t.id, new CustomEvent('duplicate'))}
-              />            </div>
+              />
+            </div>
           </div>
         {/if}
       {/each}
