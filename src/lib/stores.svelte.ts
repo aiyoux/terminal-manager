@@ -92,6 +92,46 @@ function migrateTerminal(t: any): TerminalTab {
   return t as TerminalTab;
 }
 
+/** Deep-clone saved commands with fresh IDs so duplicated terminals stay independent. */
+function cloneSavedCommands(commands: SavedCommand[] | undefined | null): SavedCommand[] {
+  if (!commands?.length) return [];
+  return commands.map((cmd) => ({
+    id: uid(),
+    label: cmd.label,
+    command: cmd.command,
+    isOnConnect: !!cmd.isOnConnect,
+    autoExecute: cmd.autoExecute,
+    sendCtrlCBefore: cmd.sendCtrlCBefore,
+  }));
+}
+
+/**
+ * Older terminal duplicates shared command IDs across terminals, which makes
+ * drag-over highlights match every copy. Re-id collisions so IDs are unique globally.
+ */
+function ensureUniqueCommandIds(conns: Connection[]): boolean {
+  const seen = new Set<string>();
+  let changed = false;
+  const visit = (terminals: TerminalTab[]) => {
+    for (const terminal of terminals) {
+      for (const cmd of terminal.savedCommands || []) {
+        if (!cmd.id || seen.has(cmd.id)) {
+          cmd.id = uid();
+          changed = true;
+        }
+        seen.add(cmd.id);
+      }
+    }
+  };
+  for (const conn of conns) {
+    for (const proj of conn.projects || []) visit(proj.terminals || []);
+    for (const pg of conn.projectGroups || []) {
+      for (const proj of pg.projects || []) visit(proj.terminals || []);
+    }
+  }
+  return changed;
+}
+
 // Load from IndexedDB on init
 if (typeof window !== 'undefined') {
   Promise.all([
@@ -114,7 +154,12 @@ if (typeof window !== 'undefined') {
           }
         }
       }
+      const reIded = ensureUniqueCommandIds(connData);
       connections = connData;
+      if (reIded) {
+        // Persist repaired IDs from prior shallow terminal duplicates
+        saveConnections($state.snapshot(connections));
+      }
     }
     if (groupData) {
       terminalGroups = groupData;
@@ -173,6 +218,7 @@ export function importState(json: string): boolean {
       }
     }
 
+    ensureUniqueCommandIds(conns);
     connections = conns;
     terminalGroups = groups;
     if (data.gridSettings) {
@@ -476,13 +522,14 @@ export function duplicateTerminal(connId: string, projectId: string, terminalId:
 
   const source = found.terminal;
   const id = uid();
+  // Fresh terminal id + fresh command ids so config/DND state is fully independent.
   const newTerminal: TerminalTab = {
     id,
     name: `${source.name} (Copy)`,
     tmuxSession: `td-${id}`,
     workingDir: source.workingDir || '',
     fontSize: source.fontSize || 14,
-    savedCommands: source.savedCommands ? JSON.parse(JSON.stringify(source.savedCommands)) : [],
+    savedCommands: cloneSavedCommands(source.savedCommands),
     collapsed: source.collapsed ?? true,
     pinned: source.pinned ?? false,
     gridHidden: source.gridHidden ?? false,

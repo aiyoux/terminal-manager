@@ -110,14 +110,14 @@
 
   // --- Drag and Drop ---
   let draggedItem = $state<{ type: 'connection' | 'project' | 'project-group' | 'terminal' | 'command' | 'group' | 'group-terminal'; id: string; index: number; connId?: string; projectId?: string; terminalId?: string; groupId?: string } | null>(null);
-  let dragOverItem = $state<{ type: string; id: string; index: number } | null>(null);
+  let dragOverItem = $state<{ type: string; id: string; index: number; terminalId?: string } | null>(null);
 
   function handleDragStart(e: DragEvent, type: any, id: string, index: number, connId?: string, projectId?: string, terminalId?: string, groupId?: string) {
     e.stopPropagation();
     draggedItem = { type, id, index, connId, projectId, terminalId, groupId };
   }
 
-  function handleDragOver(e: DragEvent, type: string, id: string, index: number) {
+  function handleDragOver(e: DragEvent, type: string, id: string, index: number, terminalId?: string) {
     e.stopPropagation();
     if (!draggedItem) return;
     if (draggedItem.type === 'terminal' && (type === 'terminal' || type === 'terminal-project-drop')) {
@@ -127,7 +127,8 @@
     }
     if (draggedItem.type === 'command' && (type === 'command' || type === 'command-terminal-drop')) {
       e.preventDefault();
-      dragOverItem = { type, id, index };
+      // Scope command drag-over by terminal so shared/legacy command IDs don't highlight every copy
+      dragOverItem = { type, id, index, terminalId: terminalId ?? (type === 'command-terminal-drop' ? id : undefined) };
       return;
     }
     if (draggedItem.type !== type) return;
@@ -150,7 +151,7 @@
         moveTerminal(draggedItem.id, destProjectId, toIndex);
       }
     } else if (draggedItem.type === 'command' && (type === 'command' || type === 'command-terminal-drop')) {
-      const destTerminalId = targetTerminalId || (type === 'command-terminal-drop' ? id : draggedItem.terminalId);
+      const destTerminalId = targetTerminalId || draggedItem.terminalId;
       if (destTerminalId && draggedItem.terminalId) {
         moveSavedCommand(draggedItem.terminalId, destTerminalId, draggedItem.id, toIndex);
       }
@@ -991,7 +992,7 @@
                                 if (draggedItem?.type === 'terminal') {
                                   handleDragOver(e, 'terminal', terminal.id, termIdx);
                                 } else if (draggedItem?.type === 'command') {
-                                  handleDragOver(e, 'command-terminal-drop', terminal.id, terminal.savedCommands.length);
+                                  handleDragOver(e, 'command-terminal-drop', terminal.id, terminal.savedCommands.length, terminal.id);
                                 }
                               }}
                               ondrop={(e) => {
@@ -1079,12 +1080,12 @@
                                     {#if terminal.savedCommands.length === 0}
                                       <p class="text-[10px] text-slate-600 italic px-2 py-1">No saved commands</p>
                                     {:else}
-                                      {#each terminal.savedCommands as cmd, cmdIdx (cmd.id)}
+                                      {#each terminal.savedCommands as cmd, cmdIdx (`${terminal.id}:${cmd.id}`)}
                                         <div
-                                          class="flex items-center gap-1 px-1 py-0.5 rounded hover:bg-white/5 group/cmd text-[10px] transition-all {dragOverItem?.type === 'command' && dragOverItem?.id === cmd.id ? 'border-t-2 border-emerald-500' : ''} {draggedItem?.type === 'command' && draggedItem?.id === cmd.id ? 'opacity-50' : ''}"
+                                          class="flex items-center gap-1 px-1 py-0.5 rounded hover:bg-white/5 group/cmd text-[10px] transition-all {dragOverItem?.type === 'command' && dragOverItem?.id === cmd.id && dragOverItem?.terminalId === terminal.id ? 'border-t-2 border-emerald-500' : ''} {draggedItem?.type === 'command' && draggedItem?.id === cmd.id && draggedItem?.terminalId === terminal.id ? 'opacity-50' : ''}"
                                           draggable="true"
                                           ondragstart={(e) => handleDragStart(e, 'command', cmd.id, cmdIdx, connId, project.id, terminal.id)}
-                                          ondragover={(e) => handleDragOver(e, 'command', cmd.id, cmdIdx)}
+                                          ondragover={(e) => handleDragOver(e, 'command', cmd.id, cmdIdx, terminal.id)}
                                           ondrop={(e) => handleDrop(e, 'command', cmdIdx, undefined, undefined, undefined, terminal.id)}
                                           ondragend={(e) => { e.stopPropagation(); draggedItem = null; dragOverItem = null; }}
                                         >

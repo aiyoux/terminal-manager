@@ -39,7 +39,8 @@ test.describe('Tooltips, Duplication, and Command Drag-and-Drop E2E Suite', () =
       if (!term) return { success: false, reason: 'No terminal' };
 
       // Add a command to source terminal
-      stores.addSavedCommand(conn.id, proj.id, term.id, 'Test Cmd', 'echo hello', true, false, false);
+      const srcCmd = stores.addSavedCommand(conn.id, proj.id, term.id, 'Test Cmd', 'echo hello', true, false, false);
+      if (!srcCmd) return { success: false, reason: 'No command' };
 
       // Duplicate terminal
       const dup = stores.duplicateTerminal(conn.id, proj.id, term.id);
@@ -47,17 +48,37 @@ test.describe('Tooltips, Duplication, and Command Drag-and-Drop E2E Suite', () =
 
       const isCopyName = dup.name === 'Source Terminal (Copy)';
       const hasCopiedCmd = dup.savedCommands.some(c => c.command === 'echo hello');
+      // Deep copy must mint new command IDs so DND/highlights are not tied together
+      const idsIndependent = dup.savedCommands.every(c => c.id !== srcCmd.id);
+      const sameLabel = dup.savedCommands.some(c => c.label === 'Test Cmd');
+
+      // Mutating the copy must not affect the source
+      const dupCmd = dup.savedCommands[0];
+      stores.updateSavedCommand(conn.id, proj.id, dup.id, dupCmd.id, 'Changed on copy', 'echo copy', true, false);
+      const sourceAfter = stores.findTerminalById(term.id)?.terminal;
+      const sourceStillOriginal = sourceAfter?.savedCommands.some(
+        c => c.id === srcCmd.id && c.label === 'Test Cmd' && c.command === 'echo hello'
+      );
+      const copyUpdated = stores.findTerminalById(dup.id)?.terminal?.savedCommands.some(
+        c => c.id === dupCmd.id && c.label === 'Changed on copy'
+      );
 
       return {
-        success: isCopyName && hasCopiedCmd,
+        success: isCopyName && hasCopiedCmd && idsIndependent && sameLabel && !!sourceStillOriginal && !!copyUpdated,
         dupName: dup.name,
-        cmdCount: dup.savedCommands.length
+        cmdCount: dup.savedCommands.length,
+        idsIndependent,
+        sourceStillOriginal: !!sourceStillOriginal,
+        copyUpdated: !!copyUpdated,
       };
     });
 
     expect(result.success).toBe(true);
     expect(result.dupName).toBe('Source Terminal (Copy)');
     expect(result.cmdCount).toBeGreaterThan(0);
+    expect(result.idsIndependent).toBe(true);
+    expect(result.sourceStillOriginal).toBe(true);
+    expect(result.copyUpdated).toBe(true);
   });
 
   test('should duplicate saved command shortcut via store helper', async ({ page }) => {
