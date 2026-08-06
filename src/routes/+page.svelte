@@ -64,6 +64,17 @@
     type TerminalGroup,
     type VariableOwnerRef,
   } from '$lib/stores.svelte';
+  import {
+    APPEND,
+    allowedZones,
+    insertIndex,
+    isInteractiveDragTarget,
+    pickZone,
+    type DragState,
+    type DragType,
+    type DropState,
+    type Zone,
+  } from '$lib/tree-dnd';
 
   let connections = $derived(getConnections());
   let terminalGroups = $derived(getTerminalGroups());
@@ -86,16 +97,35 @@
     }
   }
 
-  /** Double-click a tree label to expand/collapse (same as chevron). Stops the parent row click. */
-  function onTreeLabelDblClick(e: MouseEvent, toggle: () => void) {
-    e.preventDefault();
-    e.stopPropagation();
-    toggle();
+  // --- Row click vs. drag ---
+  // Single-click anywhere on a row bar toggles its collapse (or selects a
+  // terminal), but a press that turns into a drag (reorder) must NOT fire that
+  // click action. Track the pointer-down position and, on click, treat anything
+  // that moved more than this many pixels as a drag, not a click.
+  const ROW_DRAG_THRESHOLD = 6;
+  let rowPressXY: { x: number; y: number } | null = null;
+
+  function onRowPointerDown(e: PointerEvent) {
+    rowPressXY = { x: e.clientX, y: e.clientY };
   }
 
-  /** Stop label clicks from bubbling so a double-click does not fire the row handler twice. */
-  function onTreeLabelClick(e: MouseEvent) {
-    e.stopPropagation();
+  /** Run `action` only for a clean click — a press that moved (a drag/reorder)
+   *  is ignored. Keyboard activation (Enter, `e.detail === 0`) always runs. */
+  function onRowClick(e: MouseEvent, action: () => void) {
+    // A touch/pen drag just committed a drop — suppress the synthetic click it
+    // raises (some browsers fire it with e.detail === 0, bypassing the
+    // distance check below).
+    if (pointerDragCommitted) {
+      pointerDragCommitted = false;
+      return;
+    }
+    const press = rowPressXY;
+    rowPressXY = null;
+    if (press && e.detail > 0) {
+      const moved = Math.hypot(e.clientX - press.x, e.clientY - press.y);
+      if (moved > ROW_DRAG_THRESHOLD) return; // was a drag, not a click
+    }
+    action();
   }
 
   // Restore view settings once on client
@@ -114,74 +144,298 @@
   }
 
   // --- Drag and Drop ---
-  let draggedItem = $state<{ type: 'connection' | 'project' | 'project-group' | 'terminal' | 'command' | 'group' | 'group-terminal'; id: string; index: number; connId?: string; projectId?: string; terminalId?: string; groupId?: string } | null>(null);
-  let dragOverItem = $state<{ type: string; id: string; index: number; terminalId?: string } | null>(null);
+  // Three-zone (before / into / after) DnD with a native-HTML5 path for mouse
+  // and a pointer-event path for touch/pen. Semantics ported from modular-app's
+  // item-tree; commit layer is the existing reorder*/move* store functions.
+  type RowDescriptor = {
+    type: DragType;
+    id: string;
+    index: number;
+    connId?: string;
+    projectId?: string;
+    terminalId?: string;
+    groupId?: string;
+  };
 
-  function handleDragStart(e: DragEvent, type: any, id: string, index: number, connId?: string, projectId?: string, terminalId?: string, groupId?: string) {
-    e.stopPropagation();
-    draggedItem = { type, id, index, connId, projectId, terminalId, groupId };
+  let dragState = $state<DragState | null>(null);
+  let dropState = $state<DropState | null>(null);
+  // True once a touch/pen drag has activated and committed — onRowClick consumes
+  // it to suppress the synthetic click the drag raises.
+  let pointerDragCommitted = false;
+  let stopPointerDrag: (() => void) | null = null;
+
+  /** Active drop zone for a row, driven by the single shared dropState. Scoped
+   *  by type too: a terminal can appear both in a project's terminal list and
+   *  in a group's terminalIds, so keying on id alone would light up both rows. */
+  function activeZoneFor(rowType: DragType, rowId: string): Zone | null {
+    return dropState?.targetType === rowType && dropState?.targetId === rowId ? dropState.zone : null;
   }
 
-  function handleDragOver(e: DragEvent, type: string, id: string, index: number, terminalId?: string) {
-    e.stopPropagation();
-    if (!draggedItem) return;
-    if (draggedItem.type === 'terminal' && (type === 'terminal' || type === 'terminal-project-drop')) {
-      e.preventDefault();
-      dragOverItem = { type, id, index };
-      return;
-    }
-    if (draggedItem.type === 'command' && (type === 'command' || type === 'command-terminal-drop')) {
-      e.preventDefault();
-      // Scope command drag-over by terminal so shared/legacy command IDs don't highlight every copy
-      dragOverItem = { type, id, index, terminalId: terminalId ?? (type === 'command-terminal-drop' ? id : undefined) };
-      return;
-    }
-    if (draggedItem.type !== type) return;
-    e.preventDefault();
-    dragOverItem = { type, id, index };
+  /** Is this row the one currently being dragged? Commands are scoped by
+   *  terminal and group-terminals by group (the same id can appear in more
+   *  than one container), so only the dragged instance goes opaque. The
+   *  markup calls omit `index` — only type/id/(terminalId|groupId) are used. */
+  function isDraggingRow(desc: { type: DragType; id: string; terminalId?: string; groupId?: string }): boolean {
+    if (!dragState || dragState.type !== desc.type || dragState.id !== desc.id) return false;
+    if (desc.type === 'command' && dragState.terminalId !== desc.terminalId) return false;
+    if (desc.type === 'group-terminal' && dragState.groupId !== desc.groupId) return false;
+    return true;
   }
 
-  function handleDrop(e: DragEvent, type: string, toIndex: number, targetConnId?: string, targetGroupId?: string, targetProjectId?: string, targetTerminalId?: string) {
-    e.stopPropagation();
-    if (!draggedItem) return;
-    const fromIndex = draggedItem.index;
+  function expandConnection(connId: string) {
+    if (connections.find((c) => c.id === connId)?.collapsed) toggleConnectionCollapse(connId);
+  }
+  function expandProjectGroup(connId: string, groupId: string) {
+    const g = connections.find((c) => c.id === connId)?.projectGroups?.find((g) => g.id === groupId);
+    if (g?.collapsed) toggleProjectGroupCollapse(connId, groupId);
+  }
+  function expandProject(_connId: string, projectId: string) {
+    if (findProjectById(projectId)?.project.collapsed) toggleProjectCollapse(_connId, projectId);
+  }
+  function expandTerminal(_connId: string, _projectId: string, terminalId: string) {
+    if (findTerminalById(terminalId)?.terminal.collapsed)
+      toggleTerminalCollapse(_connId, _projectId, terminalId);
+  }
 
-    if (draggedItem.type === 'terminal' && (type === 'terminal' || type === 'terminal-project-drop')) {
-      const destProjectId = targetProjectId || (type === 'terminal-project-drop' ? targetProjectId : draggedItem.projectId);
-      if (destProjectId && draggedItem.projectId === destProjectId) {
-        if (fromIndex !== toIndex) {
-          reorderTerminals(draggedItem.connId!, destProjectId, fromIndex, toIndex);
+  /** Commit the current drag onto its drop target. Reads dragState + dropState. */
+  function commitDrop() {
+    const drag = dragState;
+    const over = dropState;
+    if (!drag || !over) return;
+
+    // Identity guard — "drop onto self" is a no-op. Commands are scoped by
+    // terminal and group-terminals by group, since the same id can appear in
+    // more than one container.
+    if (
+      drag.id === over.targetId &&
+      drag.type === over.targetType &&
+      (drag.type !== 'command' || drag.terminalId === over.terminalId) &&
+      (drag.type !== 'group-terminal' || drag.groupId === over.groupId)
+    ) {
+      dragState = null;
+      dropState = null;
+      return;
+    }
+
+    const zone = over.zone;
+    switch (drag.type) {
+      case 'connection':
+        if (over.targetType === 'connection')
+          reorderConnections(drag.index, insertIndex(drag.index, over.targetIndex, zone));
+        break;
+      case 'project':
+        if (over.targetType === 'project') {
+          const sameContainer =
+            drag.connId === over.connId && drag.groupId === over.groupId;
+          const toIndex = sameContainer
+            ? insertIndex(drag.index, over.targetIndex, zone)
+            : zone === 'before'
+              ? over.targetIndex
+              : over.targetIndex + 1;
+          moveProject(drag.id, over.connId!, over.groupId ?? null, toIndex);
+        } else if (over.targetType === 'connection') {
+          // targetId is the connection's own id (the connection descriptor
+          // carries no connId — its id IS the connection id).
+          moveProject(drag.id, over.targetId, null, APPEND);
+          expandConnection(over.targetId);
+        } else if (over.targetType === 'project-group') {
+          // targetId is the group id; connId is the group's connection.
+          moveProject(drag.id, over.connId!, over.targetId, APPEND);
+          expandProjectGroup(over.connId!, over.targetId);
         }
-      } else if (destProjectId) {
-        moveTerminal(draggedItem.id, destProjectId, toIndex);
-      }
-    } else if (draggedItem.type === 'command' && (type === 'command' || type === 'command-terminal-drop')) {
-      const destTerminalId = targetTerminalId || draggedItem.terminalId;
-      if (destTerminalId && draggedItem.terminalId) {
-        moveSavedCommand(draggedItem.terminalId, destTerminalId, draggedItem.id, toIndex);
-      }
-    } else if (draggedItem.type === type) {
-      if (type === 'connection') {
-        if (fromIndex === toIndex) return;
-        reorderConnections(fromIndex, toIndex);
-      } else if (type === 'project' && draggedItem.connId) {
-        const destConnId = targetConnId || draggedItem.connId;
-        const destGroupId = targetGroupId || null;
-        moveProject(draggedItem.id, destConnId, destGroupId, toIndex);
-      } else if (type === 'project-group' && draggedItem.connId) {
-        if (fromIndex === toIndex) return;
-        reorderProjectGroups(draggedItem.connId, fromIndex, toIndex);
-      } else if (type === 'group') {
-        if (fromIndex === toIndex) return;
-        reorderGroups(fromIndex, toIndex);
-      } else if (type === 'group-terminal' && draggedItem.groupId) {
-        if (fromIndex === toIndex) return;
-        reorderGroupTerminals(draggedItem.groupId, fromIndex, toIndex);
-      }
+        break;
+      case 'project-group':
+        // Same-connection is enforced by allowedZones.
+        if (over.targetType === 'project-group')
+          reorderProjectGroups(drag.connId!, drag.index, insertIndex(drag.index, over.targetIndex, zone));
+        break;
+      case 'terminal':
+        if (over.targetType === 'terminal') {
+          if (drag.projectId === over.projectId) {
+            reorderTerminals(drag.connId!, drag.projectId!, drag.index, insertIndex(drag.index, over.targetIndex, zone));
+          } else {
+            moveTerminal(drag.id, over.projectId!, zone === 'before' ? over.targetIndex : over.targetIndex + 1);
+          }
+        } else if (over.targetType === 'project') {
+          // targetId is the project id; connId is the project's connection.
+          moveTerminal(drag.id, over.targetId, APPEND);
+          expandProject(over.connId!, over.targetId);
+        }
+        break;
+      case 'command':
+        if (over.targetType === 'command') {
+          const sameTerminal = drag.terminalId === over.terminalId;
+          const toIndex = sameTerminal
+            ? insertIndex(drag.index, over.targetIndex, zone)
+            : zone === 'before'
+              ? over.targetIndex
+              : over.targetIndex + 1;
+          moveSavedCommand(drag.terminalId!, over.terminalId!, drag.id, toIndex);
+        } else if (over.targetType === 'terminal') {
+          // targetId is the terminal id; connId/projectId come from the
+          // terminal descriptor (needed to expand it after the drop).
+          moveSavedCommand(drag.terminalId!, over.targetId, drag.id, APPEND);
+          expandTerminal(over.connId!, over.projectId!, over.targetId);
+        }
+        break;
+      case 'group':
+        if (over.targetType === 'group')
+          reorderGroups(drag.index, insertIndex(drag.index, over.targetIndex, zone));
+        break;
+      case 'group-terminal':
+        // Same-group is enforced by allowedZones.
+        if (over.targetType === 'group-terminal')
+          reorderGroupTerminals(drag.groupId!, drag.index, insertIndex(drag.index, over.targetIndex, zone));
+        break;
     }
 
-    draggedItem = null;
-    dragOverItem = null;
+    dragState = null;
+    dropState = null;
+  }
+
+  // --- HTML5 drag path (mouse) ---
+
+  function onDragStart(e: DragEvent, desc: RowDescriptor) {
+    e.stopPropagation();
+    if (isInteractiveDragTarget(e.target)) {
+      e.preventDefault(); // don't start a drag from an action icon / chevron
+      return;
+    }
+    // The matching click is suppressed by the browser; drop the press origin so
+    // it can't be mistaken for a click later.
+    rowPressXY = null;
+    dragState = { type: desc.type, id: desc.id, index: desc.index, connId: desc.connId, projectId: desc.projectId, terminalId: desc.terminalId, groupId: desc.groupId };
+    if (e.dataTransfer) {
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', desc.id);
+    }
+  }
+
+  function onDragOver(e: DragEvent, desc: RowDescriptor) {
+    e.stopPropagation();
+    if (!dragState) return;
+    const allowed = allowedZones(dragState, { targetType: desc.type, connId: desc.connId, groupId: desc.groupId });
+    if (allowed.length === 0) return; // no preventDefault -> browser disallows drop
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+    const zone = pickZone((e.currentTarget as HTMLElement).getBoundingClientRect(), e.clientY, allowed);
+    if (!zone) return;
+    dropState = {
+      targetType: desc.type,
+      targetId: desc.id,
+      targetIndex: desc.index,
+      zone,
+      connId: desc.connId,
+      groupId: desc.groupId,
+      projectId: desc.projectId,
+      terminalId: desc.terminalId,
+    };
+  }
+
+  function onDragLeave(e: DragEvent) {
+    // Only clear when the pointer truly left this row, not when it crossed into
+    // a child (dragleave fires spuriously on child entry).
+    const rt = e.relatedTarget as Node | null;
+    if (!rt || !(e.currentTarget as Node).contains(rt)) dropState = null;
+  }
+
+  function onDrop(e: DragEvent) {
+    e.preventDefault();
+    e.stopPropagation();
+    commitDrop();
+  }
+
+  function onDragEnd(e: DragEvent) {
+    e.stopPropagation();
+    dragState = null;
+    dropState = null;
+  }
+
+  // --- Pointer drag path (touch / pen) ---
+  // Mouse primary returns early so native HTML5 drag owns it. A movement
+  // threshold gates activation so a plain tap doesn't flicker the dragged
+  // styling or commit a drop. No setPointerCapture — it would steal the bar
+  // button's tap-to-toggle click.
+
+  function rowFromPoint(x: number, y: number): HTMLElement | null {
+    return document.elementFromPoint(x, y)?.closest<HTMLElement>('[data-dnd-row]') ?? null;
+  }
+
+  function descriptorFromDataset(el: HTMLElement): RowDescriptor | null {
+    const ds = el.dataset;
+    if (!ds.dndType || !ds.dndId) return null;
+    return {
+      type: ds.dndType as DragType,
+      id: ds.dndId,
+      index: Number(ds.dndIndex ?? '0'),
+      connId: ds.dndConn || undefined,
+      groupId: ds.dndGroup || undefined,
+      projectId: ds.dndProject || undefined,
+      terminalId: ds.dndTerminal || undefined,
+    };
+  }
+
+  function onPointerDown(e: PointerEvent, desc: RowDescriptor) {
+    pointerDragCommitted = false; // fresh for this gesture
+    if (e.pointerType === 'mouse' && e.button === 0) return; // HTML5 owns mouse
+    if (isInteractiveDragTarget(e.target)) return;
+    e.stopPropagation(); // prevent nested wrappers starting a second session
+
+    let activated = false;
+    const startX = e.clientX;
+    const startY = e.clientY;
+
+    const move = (ev: PointerEvent) => {
+      if (!activated) {
+        if (Math.hypot(ev.clientX - startX, ev.clientY - startY) <= ROW_DRAG_THRESHOLD) return;
+        activated = true;
+        pointerDragCommitted = true;
+        dragState = { type: desc.type, id: desc.id, index: desc.index, connId: desc.connId, projectId: desc.projectId, terminalId: desc.terminalId, groupId: desc.groupId };
+      }
+      const el = rowFromPoint(ev.clientX, ev.clientY);
+      const t = el && descriptorFromDataset(el);
+      // Can't drop on self — commands scoped by terminal, group-terminals by
+      // group (the same id can appear in more than one container).
+      const isSelf =
+        t != null &&
+        t.type === desc.type &&
+        t.id === desc.id &&
+        (t.type !== 'command' || t.terminalId === desc.terminalId) &&
+        (t.type !== 'group-terminal' || t.groupId === desc.groupId);
+      if (!t || isSelf) {
+        dropState = null;
+        return;
+      }
+      const allowed = allowedZones(dragState!, { targetType: t.type, connId: t.connId, groupId: t.groupId });
+      if (allowed.length === 0) {
+        dropState = null;
+        return;
+      }
+      const zone = el ? pickZone(el.getBoundingClientRect(), ev.clientY, allowed) : null;
+      if (!zone) {
+        dropState = null;
+        return;
+      }
+      dropState = { targetType: t.type, targetId: t.id, targetIndex: t.index, zone, connId: t.connId, groupId: t.groupId, projectId: t.projectId, terminalId: t.terminalId };
+    };
+
+    const finish = () => {
+      if (activated) commitDrop();
+      stopPointerDrag?.();
+      stopPointerDrag = null;
+      dragState = null;
+      dropState = null;
+    };
+
+    stopPointerDrag?.();
+    document.addEventListener('pointermove', move);
+    document.addEventListener('pointerup', finish, { once: true });
+    document.addEventListener('pointercancel', finish, { once: true });
+    stopPointerDrag = () => {
+      document.removeEventListener('pointermove', move);
+      document.removeEventListener('pointerup', finish);
+      document.removeEventListener('pointercancel', finish);
+    };
   }
 
   // --- Import/Export ---
@@ -913,27 +1167,22 @@
 
           {#each connections as conn, connIdx (conn.id)}
             <div
-              class="mb-2 transition-all {dragOverItem?.type === 'connection' && dragOverItem?.id === conn.id ? 'border-t-2 border-sky-500' : ''} {draggedItem?.type === 'connection' && draggedItem?.id === conn.id ? 'opacity-50' : ''} {dragOverItem?.type === 'project-conn-drop' && dragOverItem?.id === conn.id ? 'bg-sky-500/10 rounded-md ring-1 ring-sky-500/30' : ''}"
+              class="relative mb-2 transition-all {isDraggingRow({ type: 'connection', id: conn.id }) ? 'opacity-50' : ''} {activeZoneFor('connection', conn.id) === 'into' ? 'bg-sky-500/10 rounded-md ring-1 ring-sky-500/30' : ''}"
               draggable="true"
-              ondragstart={(e) => handleDragStart(e, 'connection', conn.id, connIdx)}
-              ondragover={(e) => {
-                if (draggedItem?.type === 'project') {
-                  e.preventDefault();
-                  dragOverItem = { type: 'project-conn-drop', id: conn.id, index: 0 };
-                } else {
-                  handleDragOver(e, 'connection', conn.id, connIdx);
-                }
-              }}
-              ondrop={(e) => {
-                if (draggedItem?.type === 'project') {
-                  handleDrop(e, 'project', 0, conn.id);
-                } else {
-                  handleDrop(e, 'connection', connIdx);
-                }
-              }}
-              ondragend={(e) => { e.stopPropagation(); draggedItem = null; dragOverItem = null; }}
+              data-dnd-row
+              data-dnd-type="connection"
+              data-dnd-id={conn.id}
+              data-dnd-index={connIdx}
+              ondragstart={(e) => onDragStart(e, { type: 'connection', id: conn.id, index: connIdx })}
+              ondragover={(e) => onDragOver(e, { type: 'connection', id: conn.id, index: connIdx })}
+              ondragleave={onDragLeave}
+              ondrop={onDrop}
+              ondragend={onDragEnd}
+              onpointerdown={(e) => onPointerDown(e, { type: 'connection', id: conn.id, index: connIdx })}
             >
-              <button class="w-full flex items-center justify-between px-2 py-1.5 rounded-lg text-xs font-semibold transition-colors hover:bg-white/5 group" onclick={() => toggleConnectionCollapse(conn.id)}>
+              {#if activeZoneFor('connection', conn.id) === 'before'}<div class="absolute top-0 left-0 right-0 h-0.5 bg-sky-500 z-10 pointer-events-none"></div>{/if}
+              {#if activeZoneFor('connection', conn.id) === 'after'}<div class="absolute bottom-0 left-0 right-0 h-0.5 bg-sky-500 z-10 pointer-events-none"></div>{/if}
+              <button class="w-full flex items-center justify-between px-2 py-1.5 rounded-lg text-xs font-semibold transition-colors hover:bg-white/5 group" onpointerdown={onRowPointerDown} onclick={(e) => onRowClick(e, () => toggleConnectionCollapse(conn.id))}>
                 <div class="flex items-center gap-2 overflow-hidden">
                   <div class="cursor-grab active:cursor-grabbing p-0.5 text-slate-600 hover:text-slate-400 opacity-0 group-hover:opacity-100 transition-opacity" data-tooltip="Drag to reorder connection" data-tooltip-pos="bottom-right">
                     <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="5" r="1"/><circle cx="9" cy="12" r="1"/><circle cx="9" cy="19" r="1"/><circle cx="15" cy="5" r="1"/><circle cx="15" cy="12" r="1"/><circle cx="15" cy="19" r="1"/></svg>
@@ -942,12 +1191,10 @@
                   <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0 text-sky-400" data-tooltip="Server connection" data-tooltip-pos="bottom-right"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
                   <span
                     class="truncate text-slate-200 select-none cursor-default"
-                    title="Double-click to expand/collapse"
-                    onclick={onTreeLabelClick}
-                    ondblclick={(e) => onTreeLabelDblClick(e, () => toggleConnectionCollapse(conn.id))}
+                    title="Click to expand/collapse"
                   >{conn.name}</span>
                 </div>
-                <div class="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                <div class="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity" data-no-drag>
                   <div role="button" tabindex="0" data-tooltip="Edit connection variables" data-tooltip-pos="bottom-left" onclick={(e) => openVariables({ kind: 'connection', connectionId: conn.id }, `Variables · ${conn.name}`, e)} onkeydown={(e) => e.key === 'Enter' && openVariables({ kind: 'connection', connectionId: conn.id }, `Variables · ${conn.name}`)} class="p-0.5 text-slate-500 hover:text-cyan-400 rounded hover:bg-cyan-500/20 transition-colors">
                     <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9h16"/><path d="M4 15h16"/><path d="M10 3 8 21"/><path d="m16 3-2 18"/></svg>
                   </div>
@@ -972,26 +1219,24 @@
 
                   {#snippet projectSnippet(connId, project, projIdx, groupId)}
                     <div
-                      class="mb-1 transition-all {dragOverItem?.type === 'project' && dragOverItem?.id === project.id ? 'border-t-2 border-amber-500' : ''} {draggedItem?.type === 'project' && draggedItem?.id === project.id ? 'opacity-50' : ''} {dragOverItem?.type === 'terminal-project-drop' && dragOverItem?.id === project.id ? 'bg-sky-500/10 rounded-md ring-1 ring-sky-500/30' : ''}"
+                      class="relative mb-1 transition-all {isDraggingRow({ type: 'project', id: project.id }) ? 'opacity-50' : ''} {activeZoneFor('project', project.id) === 'into' ? 'bg-sky-500/10 rounded-md ring-1 ring-sky-500/30' : ''}"
                       draggable="true"
-                      ondragstart={(e) => handleDragStart(e, 'project', project.id, projIdx, connId, undefined, undefined, groupId)}
-                      ondragover={(e) => {
-                        if (draggedItem?.type === 'project') {
-                          handleDragOver(e, 'project', project.id, projIdx);
-                        } else if (draggedItem?.type === 'terminal') {
-                          handleDragOver(e, 'terminal-project-drop', project.id, project.terminals.length);
-                        }
-                      }}
-                      ondrop={(e) => {
-                        if (draggedItem?.type === 'project') {
-                          handleDrop(e, 'project', projIdx, connId, groupId);
-                        } else if (draggedItem?.type === 'terminal') {
-                          handleDrop(e, 'terminal-project-drop', project.terminals.length, connId, groupId, project.id);
-                        }
-                      }}
-                      ondragend={(e) => { e.stopPropagation(); draggedItem = null; dragOverItem = null; }}
+                      data-dnd-row
+                      data-dnd-type="project"
+                      data-dnd-id={project.id}
+                      data-dnd-index={projIdx}
+                      data-dnd-conn={connId}
+                      data-dnd-group={groupId}
+                      ondragstart={(e) => onDragStart(e, { type: 'project', id: project.id, index: projIdx, connId, groupId })}
+                      ondragover={(e) => onDragOver(e, { type: 'project', id: project.id, index: projIdx, connId, groupId })}
+                      ondragleave={onDragLeave}
+                      ondrop={onDrop}
+                      ondragend={onDragEnd}
+                      onpointerdown={(e) => onPointerDown(e, { type: 'project', id: project.id, index: projIdx, connId, groupId })}
                     >
-                      <button class="w-full flex items-center justify-between px-2 py-1 rounded-md text-xs transition-colors hover:bg-white/5 group" onclick={() => toggleProjectCollapse(connId, project.id)}>
+                      {#if activeZoneFor('project', project.id) === 'before'}<div class="absolute top-0 left-0 right-0 h-0.5 bg-amber-500 z-10 pointer-events-none"></div>{/if}
+                      {#if activeZoneFor('project', project.id) === 'after'}<div class="absolute bottom-0 left-0 right-0 h-0.5 bg-amber-500 z-10 pointer-events-none"></div>{/if}
+                      <button class="w-full flex items-center justify-between px-2 py-1 rounded-md text-xs transition-colors hover:bg-white/5 group" onpointerdown={onRowPointerDown} onclick={(e) => onRowClick(e, () => toggleProjectCollapse(connId, project.id))}>
                         <div class="flex items-center gap-2 overflow-hidden">
                           <div class="cursor-grab active:cursor-grabbing p-0.5 text-slate-600 hover:text-slate-400 opacity-0 group-hover:opacity-100 transition-opacity" data-tooltip="Drag to reorder project" data-tooltip-pos="bottom-right">
                             <svg xmlns="http://www.w3.org/2000/svg" width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="5" r="1"/><circle cx="9" cy="12" r="1"/><circle cx="9" cy="19" r="1"/><circle cx="15" cy="5" r="1"/><circle cx="15" cy="12" r="1"/><circle cx="15" cy="19" r="1"/></svg>
@@ -1000,12 +1245,10 @@
                           <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0 text-amber-400" data-tooltip="Project workspace" data-tooltip-pos="bottom-right"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
                           <span
                             class="truncate text-slate-300 select-none cursor-default"
-                            title="Double-click to expand/collapse"
-                            onclick={onTreeLabelClick}
-                            ondblclick={(e) => onTreeLabelDblClick(e, () => toggleProjectCollapse(connId, project.id))}
+                            title="Click to expand/collapse"
                           >{project.name}</span>
                         </div>
-                        <div class="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                        <div class="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity" data-no-drag>
                           <div role="button" tabindex="0" data-tooltip="Edit project variables" data-tooltip-pos="bottom-left" onclick={(e) => openVariables({ kind: 'project', projectId: project.id }, `Variables · ${project.name}`, e)} onkeydown={(e) => e.key === 'Enter' && openVariables({ kind: 'project', projectId: project.id }, `Variables · ${project.name}`)} class="p-0.5 text-slate-500 hover:text-cyan-400 rounded hover:bg-cyan-500/20 transition-colors">
                             <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9h16"/><path d="M4 15h16"/><path d="M10 3 8 21"/><path d="m16 3-2 18"/></svg>
                           </div>
@@ -1034,28 +1277,27 @@
                             {@const isConn = !!connectionStatuses[terminal.id]}
                             <!-- Terminal row -->
                             <div
-                              class="mb-0.5 transition-all {dragOverItem?.type === 'terminal' && dragOverItem?.id === terminal.id ? 'border-t-2 border-sky-400' : ''} {draggedItem?.type === 'terminal' && draggedItem?.id === terminal.id ? 'opacity-50' : ''} {dragOverItem?.type === 'command-terminal-drop' && dragOverItem?.id === terminal.id ? 'bg-emerald-500/10 rounded-md ring-1 ring-emerald-500/30' : ''}"
+                              class="relative mb-0.5 transition-all {isDraggingRow({ type: 'terminal', id: terminal.id }) ? 'opacity-50' : ''} {activeZoneFor('terminal', terminal.id) === 'into' ? 'bg-emerald-500/10 rounded-md ring-1 ring-emerald-500/30' : ''}"
                               draggable="true"
-                              ondragstart={(e) => handleDragStart(e, 'terminal', terminal.id, termIdx, connId, project.id)}
-                              ondragover={(e) => {
-                                if (draggedItem?.type === 'terminal') {
-                                  handleDragOver(e, 'terminal', terminal.id, termIdx);
-                                } else if (draggedItem?.type === 'command') {
-                                  handleDragOver(e, 'command-terminal-drop', terminal.id, terminal.savedCommands.length, terminal.id);
-                                }
-                              }}
-                              ondrop={(e) => {
-                                if (draggedItem?.type === 'terminal') {
-                                  handleDrop(e, 'terminal', termIdx, connId, undefined, project.id);
-                                } else if (draggedItem?.type === 'command') {
-                                  handleDrop(e, 'command-terminal-drop', terminal.savedCommands.length, undefined, undefined, undefined, terminal.id);
-                                }
-                              }}
-                              ondragend={(e) => { e.stopPropagation(); draggedItem = null; dragOverItem = null; }}
+                              data-dnd-row
+                              data-dnd-type="terminal"
+                              data-dnd-id={terminal.id}
+                              data-dnd-index={termIdx}
+                              data-dnd-conn={connId}
+                              data-dnd-project={project.id}
+                              ondragstart={(e) => onDragStart(e, { type: 'terminal', id: terminal.id, index: termIdx, connId, projectId: project.id })}
+                              ondragover={(e) => onDragOver(e, { type: 'terminal', id: terminal.id, index: termIdx, connId, projectId: project.id })}
+                              ondragleave={onDragLeave}
+                              ondrop={onDrop}
+                              ondragend={onDragEnd}
+                              onpointerdown={(e) => onPointerDown(e, { type: 'terminal', id: terminal.id, index: termIdx, connId, projectId: project.id })}
                             >
+                              {#if activeZoneFor('terminal', terminal.id) === 'before'}<div class="absolute top-0 left-0 right-0 h-0.5 bg-sky-400 z-10 pointer-events-none"></div>{/if}
+                              {#if activeZoneFor('terminal', terminal.id) === 'after'}<div class="absolute bottom-0 left-0 right-0 h-0.5 bg-sky-400 z-10 pointer-events-none"></div>{/if}
                               <button
                                 class="w-full flex items-center justify-between px-2 py-1 rounded-md text-xs transition-all group {activeTerminalId === terminal.id ? 'bg-sky-500/10 text-sky-400 ring-1 ring-sky-500/30' : 'text-slate-400 hover:bg-white/5 hover:text-slate-200'}"
-                                onclick={() => handleSelectTerminal(terminal.id)}
+                                onpointerdown={onRowPointerDown}
+                                onclick={(e) => onRowClick(e, () => handleSelectTerminal(terminal.id))}
                               >
                                 <div class="flex items-center gap-1.5 overflow-hidden">
                                   <div class="cursor-grab active:cursor-grabbing p-0.5 text-slate-600 hover:text-slate-400 opacity-0 group-hover:opacity-100 transition-opacity" data-tooltip="Drag to reorder terminal" data-tooltip-pos="bottom-right">
@@ -1063,7 +1305,7 @@
                                   </div>
                                   <!-- Expand arrow for saved commands -->
                                   <div
-                                    role="button" tabindex="0" data-tooltip="Saved command shortcuts" data-tooltip-pos="bottom-left"
+                                    role="button" tabindex="0" data-no-drag data-tooltip="Saved command shortcuts" data-tooltip-pos="bottom-left"
                                     onclick={(e) => { e.stopPropagation(); toggleTerminalCollapse(connId, project.id, terminal.id); }}
                                     onkeydown={(e) => e.key === 'Enter' && toggleTerminalCollapse(connId, project.id, terminal.id)}
                                     class="shrink-0 p-0.5 -ml-0.5 hover:bg-white/10 rounded transition-colors"
@@ -1074,13 +1316,12 @@
                                   <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0" data-tooltip="Terminal session" data-tooltip-pos="bottom-right"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
                                   <span
                                     class="truncate select-none cursor-default"
-                                    title="Double-click to expand/collapse commands"
+                                    title="Click the arrow to expand/collapse commands"
                                     data-tooltip={onConnectErrorTooltip(terminal.id)}
                                     data-tooltip-pos="bottom-right"
-                                    ondblclick={(e) => onTreeLabelDblClick(e, () => toggleTerminalCollapse(connId, project.id, terminal.id))}
                                   >{terminal.name}</span>
                                 </div>
-                                <div class="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-all">
+                                <div class="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-all" data-no-drag>
                                   <div role="button" tabindex="0" data-tooltip={terminal.gridHidden ? 'Show in grid view' : 'Hide from grid view'} data-tooltip-pos="bottom-left" onclick={(e) => { e.stopPropagation(); toggleTerminalGridHidden(connId, project.id, terminal.id); }} onkeydown={(e) => e.key === 'Enter' && toggleTerminalGridHidden(connId, project.id, terminal.id)} class="p-0.5 rounded transition-colors {terminal.gridHidden ? 'text-slate-600 hover:text-slate-400' : 'text-sky-400 bg-sky-500/10 hover:bg-sky-500/20'}">
                                     <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                                       {#if terminal.gridHidden}
@@ -1125,7 +1366,7 @@
                                     <div class="flex items-center justify-between px-2">
                                       <span class="text-[9px] uppercase tracking-widest text-slate-600">Commands</span>
                                       <div
-                                        role="button" tabindex="0" data-tooltip="Add saved command shortcut" data-tooltip-pos="bottom-left"
+                                        role="button" tabindex="0" data-no-drag data-tooltip="Add saved command shortcut" data-tooltip-pos="bottom-left"
                                         onclick={(e) => handleAddCommand(connId, project.id, terminal.id, e)}
                                         onkeydown={(e) => e.key === 'Enter' && handleAddCommand(connId, project.id, terminal.id, e)}
                                         class="p-0.5 text-slate-600 hover:text-emerald-400 rounded hover:bg-emerald-500/20 transition-colors"
@@ -1139,19 +1380,31 @@
                                     {:else}
                                       {#each terminal.savedCommands as cmd, cmdIdx (`${terminal.id}:${cmd.id}`)}
                                         <div
-                                          class="flex items-center gap-1 px-1 py-0.5 rounded hover:bg-white/5 group/cmd text-[10px] transition-all {dragOverItem?.type === 'command' && dragOverItem?.id === cmd.id && dragOverItem?.terminalId === terminal.id ? 'border-t-2 border-emerald-500' : ''} {draggedItem?.type === 'command' && draggedItem?.id === cmd.id && draggedItem?.terminalId === terminal.id ? 'opacity-50' : ''}"
+                                          class="relative flex items-center gap-1 px-1 py-0.5 rounded hover:bg-white/5 group/cmd text-[10px] transition-all {isDraggingRow({ type: 'command', id: cmd.id, terminalId: terminal.id }) ? 'opacity-50' : ''} {activeZoneFor('command', cmd.id) === 'into' ? 'bg-emerald-500/10 ring-1 ring-emerald-500/30' : ''}"
                                           draggable="true"
-                                          ondragstart={(e) => handleDragStart(e, 'command', cmd.id, cmdIdx, connId, project.id, terminal.id)}
-                                          ondragover={(e) => handleDragOver(e, 'command', cmd.id, cmdIdx, terminal.id)}
-                                          ondrop={(e) => handleDrop(e, 'command', cmdIdx, undefined, undefined, undefined, terminal.id)}
-                                          ondragend={(e) => { e.stopPropagation(); draggedItem = null; dragOverItem = null; }}
+                                          data-dnd-row
+                                          data-dnd-type="command"
+                                          data-dnd-id={cmd.id}
+                                          data-dnd-index={cmdIdx}
+                                          data-dnd-conn={connId}
+                                          data-dnd-project={project.id}
+                                          data-dnd-terminal={terminal.id}
+                                          ondragstart={(e) => onDragStart(e, { type: 'command', id: cmd.id, index: cmdIdx, connId, projectId: project.id, terminalId: terminal.id })}
+                                          ondragover={(e) => onDragOver(e, { type: 'command', id: cmd.id, index: cmdIdx, terminalId: terminal.id })}
+                                          ondragleave={onDragLeave}
+                                          ondrop={onDrop}
+                                          ondragend={onDragEnd}
+                                          onpointerdown={(e) => onPointerDown(e, { type: 'command', id: cmd.id, index: cmdIdx, connId, projectId: project.id, terminalId: terminal.id })}
                                         >
+                                          {#if activeZoneFor('command', cmd.id) === 'before'}<div class="absolute top-0 left-0 right-0 h-0.5 bg-emerald-500 z-10 pointer-events-none"></div>{/if}
+                                          {#if activeZoneFor('command', cmd.id) === 'after'}<div class="absolute bottom-0 left-0 right-0 h-0.5 bg-emerald-500 z-10 pointer-events-none"></div>{/if}
                                           <div class="cursor-grab active:cursor-grabbing p-0.5 text-slate-700 hover:text-slate-500 opacity-0 group-hover/cmd:opacity-100 transition-opacity" data-tooltip="Drag to reorder or move command to another terminal" data-tooltip-pos="bottom-right">
                                             <svg xmlns="http://www.w3.org/2000/svg" width="7" height="7" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="5" r="1"/><circle cx="9" cy="12" r="1"/><circle cx="9" cy="19" r="1"/><circle cx="15" cy="5" r="1"/><circle cx="15" cy="12" r="1"/><circle cx="15" cy="19" r="1"/></svg>
                                           </div>
                                           {#if showCommandActionIcons}
                                             <!-- On-connect toggle -->
                                             <button
+                                              data-no-drag
                                               data-tooltip={cmd.isOnConnect ? 'Auto-run on connect (click to disable)' : 'Auto-run on connect (click to enable)'}
                                               data-tooltip-pos="top-left"
                                               onclick={(e) => { e.stopPropagation(); toggleCommandOnConnect(connId, project.id, terminal.id, cmd.id); }}
@@ -1161,6 +1414,7 @@
                                             </button>
                                             <!-- Auto-execute toggle -->
                                             <button
+                                              data-no-drag
                                               data-tooltip={cmd.autoExecute !== false ? 'Executes command with Enter (click to inject text only)' : 'Injects text only (click to auto-execute)'}
                                               data-tooltip-pos="top-left"
                                               onclick={(e) => { e.stopPropagation(); toggleCommandAutoExecute(connId, project.id, terminal.id, cmd.id); }}
@@ -1170,6 +1424,7 @@
                                             </button>
                                             <!-- Ctrl+C before toggle -->
                                             <button
+                                              data-no-drag
                                               data-tooltip={cmd.sendCtrlCBefore ? 'Sends Ctrl+C before running (click to disable)' : 'Send Ctrl+C before running'}
                                               data-tooltip-pos="top-left"
                                               onclick={(e) => { e.stopPropagation(); toggleCommandCtrlCBefore(connId, project.id, terminal.id, cmd.id); }}
@@ -1180,6 +1435,7 @@
                                           {/if}
                                           <!-- Run button -->
                                           <button
+                                            data-no-drag
                                             data-tooltip="{cmd.sendCtrlCBefore ? '(Ctrl+C) ' : ''}{cmd.autoExecute !== false ? 'Execute: ' : 'Inject: '}{cmd.command}"
                                             data-tooltip-pos="top-left"
                                             onclick={(e) => handleRunCommand(terminal.id, cmd.command, cmd.autoExecute !== false, !!cmd.sendCtrlCBefore, e)}
@@ -1190,7 +1446,7 @@
                                           </button>
                                           <!-- Duplicate -->
                                           <div
-                                            role="button" tabindex="0" data-tooltip="Duplicate command shortcut" data-tooltip-pos="top-left"
+                                            role="button" tabindex="0" data-no-drag data-tooltip="Duplicate command shortcut" data-tooltip-pos="top-left"
                                             onclick={(e) => { e.stopPropagation(); duplicateSavedCommand(connId, project.id, terminal.id, cmd.id); }}
                                             onkeydown={(e) => e.key === 'Enter' && duplicateSavedCommand(connId, project.id, terminal.id, cmd.id)}
                                             class="shrink-0 p-0.5 text-slate-600 hover:text-sky-400 rounded hover:bg-sky-500/20 transition-colors opacity-0 group-hover/cmd:opacity-100"
@@ -1199,7 +1455,7 @@
                                           </div>
                                           <!-- Edit -->
                                           <div
-                                            role="button" tabindex="0" data-tooltip="Edit command shortcut" data-tooltip-pos="top-left"
+                                            role="button" tabindex="0" data-no-drag data-tooltip="Edit command shortcut" data-tooltip-pos="top-left"
                                             onclick={(e) => handleEditCommand(connId, project.id, terminal.id, cmd, e)}
                                             onkeydown={(e) => e.key === 'Enter' && handleEditCommand(connId, project.id, terminal.id, cmd, e)}
                                             class="shrink-0 p-0.5 text-slate-600 hover:text-sky-400 rounded hover:bg-sky-500/20 transition-colors opacity-0 group-hover/cmd:opacity-100"
@@ -1208,7 +1464,7 @@
                                           </div>
                                           <!-- Remove -->
                                           <div
-                                            role="button" tabindex="0" data-tooltip="Remove command shortcut" data-tooltip-pos="top-left"
+                                            role="button" tabindex="0" data-no-drag data-tooltip="Remove command shortcut" data-tooltip-pos="top-left"
                                             onclick={(e) => handleRemoveSavedCommand(connId, project.id, terminal.id, cmd.id, e)}
                                             onkeydown={(e) => e.key === 'Enter' && handleRemoveSavedCommand(connId, project.id, terminal.id, cmd.id, e)}
                                             class="shrink-0 p-0.5 text-slate-600 hover:text-rose-400 rounded hover:bg-rose-500/20 transition-colors opacity-0 group-hover/cmd:opacity-100"
@@ -1232,27 +1488,24 @@
                   {#if conn.projectGroups}
                     {#each conn.projectGroups as group, groupIdx (group.id)}
                       <div
-                        class="mb-1 transition-all {dragOverItem?.type === 'project-group' && dragOverItem?.id === group.id ? 'border-t-2 border-violet-500' : ''} {draggedItem?.type === 'project-group' && draggedItem?.id === group.id ? 'opacity-50' : ''} {dragOverItem?.type === 'project-group-drop' && dragOverItem?.id === group.id ? 'bg-violet-500/10 rounded-md ring-1 ring-violet-500/30' : ''}"
+                        class="relative mb-1 transition-all {isDraggingRow({ type: 'project-group', id: group.id }) ? 'opacity-50' : ''} {activeZoneFor('project-group', group.id) === 'into' ? 'bg-violet-500/10 rounded-md ring-1 ring-violet-500/30' : ''}"
                         draggable="true"
-                        ondragstart={(e) => handleDragStart(e, 'project-group', group.id, groupIdx, conn.id)}
-                        ondragover={(e) => {
-                          if (draggedItem?.type === 'project') {
-                            e.preventDefault();
-                            dragOverItem = { type: 'project-group-drop', id: group.id, index: 0 };
-                          } else if (draggedItem?.type === 'project-group') {
-                            handleDragOver(e, 'project-group', group.id, groupIdx);
-                          }
-                        }}
-                        ondrop={(e) => {
-                          if (draggedItem?.type === 'project') {
-                            handleDrop(e, 'project', 0, conn.id, group.id);
-                          } else if (draggedItem?.type === 'project-group') {
-                            handleDrop(e, 'project-group', groupIdx, conn.id);
-                          }
-                        }}
-                        ondragend={(e) => { e.stopPropagation(); draggedItem = null; dragOverItem = null; }}
+                        data-dnd-row
+                        data-dnd-type="project-group"
+                        data-dnd-id={group.id}
+                        data-dnd-index={groupIdx}
+                        data-dnd-conn={conn.id}
+                        data-dnd-group={group.id}
+                        ondragstart={(e) => onDragStart(e, { type: 'project-group', id: group.id, index: groupIdx, connId: conn.id, groupId: group.id })}
+                        ondragover={(e) => onDragOver(e, { type: 'project-group', id: group.id, index: groupIdx, connId: conn.id, groupId: group.id })}
+                        ondragleave={onDragLeave}
+                        ondrop={onDrop}
+                        ondragend={onDragEnd}
+                        onpointerdown={(e) => onPointerDown(e, { type: 'project-group', id: group.id, index: groupIdx, connId: conn.id, groupId: group.id })}
                       >
-                        <button class="w-full flex items-center justify-between px-2 py-1.5 rounded-md text-xs transition-colors hover:bg-white/5 group/pg" onclick={() => toggleProjectGroupCollapse(conn.id, group.id)}>
+                        {#if activeZoneFor('project-group', group.id) === 'before'}<div class="absolute top-0 left-0 right-0 h-0.5 bg-violet-500 z-10 pointer-events-none"></div>{/if}
+                        {#if activeZoneFor('project-group', group.id) === 'after'}<div class="absolute bottom-0 left-0 right-0 h-0.5 bg-violet-500 z-10 pointer-events-none"></div>{/if}
+                        <button class="w-full flex items-center justify-between px-2 py-1.5 rounded-md text-xs transition-colors hover:bg-white/5 group/pg" onpointerdown={onRowPointerDown} onclick={(e) => onRowClick(e, () => toggleProjectGroupCollapse(conn.id, group.id))}>
                           <div class="flex items-center gap-2 overflow-hidden">
                             <div class="cursor-grab active:cursor-grabbing p-0.5 text-slate-600 hover:text-slate-400 opacity-0 group-hover/pg:opacity-100 transition-opacity" data-tooltip="Drag to reorder project group" data-tooltip-pos="bottom-right">
                               <svg xmlns="http://www.w3.org/2000/svg" width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="5" r="1"/><circle cx="9" cy="12" r="1"/><circle cx="9" cy="19" r="1"/><circle cx="15" cy="5" r="1"/><circle cx="15" cy="12" r="1"/><circle cx="15" cy="19" r="1"/></svg>
@@ -1261,12 +1514,10 @@
                             <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0 text-violet-400" data-tooltip="Project group" data-tooltip-pos="bottom-right"><path d="M15.5 17.5H22a2 2 0 0 0 2-2v-8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L11.6 3.4a2 2 0 0 0-1.67-.9H4a2 2 0 0 0-2 2v12.5a2 2 0 0 0 2 2h1.5"/><path d="M5 17.5v3A2 2 0 0 0 7 22.5h15a2 2 0 0 0 2-2v-3"/></svg>
                             <span
                               class="truncate font-medium text-slate-200 select-none cursor-default"
-                              title="Double-click to expand/collapse"
-                              onclick={onTreeLabelClick}
-                              ondblclick={(e) => onTreeLabelDblClick(e, () => toggleProjectGroupCollapse(conn.id, group.id))}
+                              title="Click to expand/collapse"
                             >{group.name}</span>
                           </div>
-                          <div class="flex items-center gap-1 opacity-0 group-hover/pg:opacity-100 transition-opacity">
+                          <div class="flex items-center gap-1 opacity-0 group-hover/pg:opacity-100 transition-opacity" data-no-drag>
                             <div role="button" tabindex="0" data-tooltip="Edit project group variables" data-tooltip-pos="bottom-left" onclick={(e) => openVariables({ kind: 'projectGroup', connectionId: conn.id, projectGroupId: group.id }, `Variables · ${group.name}`, e)} onkeydown={(e) => e.key === 'Enter' && openVariables({ kind: 'projectGroup', connectionId: conn.id, projectGroupId: group.id }, `Variables · ${group.name}`)} class="p-0.5 text-slate-500 hover:text-cyan-400 rounded hover:bg-cyan-500/20 transition-colors">
                               <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9h16"/><path d="M4 15h16"/><path d="M10 3 8 21"/><path d="m16 3-2 18"/></svg>
                             </div>
@@ -1312,14 +1563,22 @@
           <div class="text-[10px] font-bold uppercase tracking-widest text-slate-500 mb-3 px-2">Groups</div>
           {#each terminalGroups as group, groupIdx (group.id)}
             <div
-              class="mb-2 transition-all {dragOverItem?.type === 'group' && dragOverItem?.id === group.id ? 'border-t-2 border-indigo-500' : ''} {draggedItem?.type === 'group' && draggedItem?.id === group.id ? 'opacity-50' : ''}"
+              class="relative mb-2 transition-all {isDraggingRow({ type: 'group', id: group.id }) ? 'opacity-50' : ''}"
               draggable="true"
-              ondragstart={(e) => handleDragStart(e, 'group', group.id, groupIdx)}
-              ondragover={(e) => handleDragOver(e, 'group', group.id, groupIdx)}
-              ondrop={(e) => handleDrop(e, 'group', groupIdx)}
-              ondragend={(e) => { e.stopPropagation(); draggedItem = null; dragOverItem = null; }}
+              data-dnd-row
+              data-dnd-type="group"
+              data-dnd-id={group.id}
+              data-dnd-index={groupIdx}
+              ondragstart={(e) => onDragStart(e, { type: 'group', id: group.id, index: groupIdx })}
+              ondragover={(e) => onDragOver(e, { type: 'group', id: group.id, index: groupIdx })}
+              ondragleave={onDragLeave}
+              ondrop={onDrop}
+              ondragend={onDragEnd}
+              onpointerdown={(e) => onPointerDown(e, { type: 'group', id: group.id, index: groupIdx })}
             >
-              <button class="w-full flex items-center justify-between px-2 py-1.5 rounded-lg text-xs font-semibold transition-colors hover:bg-white/5 group" onclick={() => toggleGroupCollapse(group.id)}>
+              {#if activeZoneFor('group', group.id) === 'before'}<div class="absolute top-0 left-0 right-0 h-0.5 bg-indigo-500 z-10 pointer-events-none"></div>{/if}
+              {#if activeZoneFor('group', group.id) === 'after'}<div class="absolute bottom-0 left-0 right-0 h-0.5 bg-indigo-500 z-10 pointer-events-none"></div>{/if}
+              <button class="w-full flex items-center justify-between px-2 py-1.5 rounded-lg text-xs font-semibold transition-colors hover:bg-white/5 group" onpointerdown={onRowPointerDown} onclick={(e) => onRowClick(e, () => toggleGroupCollapse(group.id))}>
                 <div class="flex items-center gap-2 overflow-hidden">
                   <div class="cursor-grab active:cursor-grabbing p-0.5 text-slate-600 hover:text-slate-400 opacity-0 group-hover:opacity-100 transition-opacity" data-tooltip="Drag to reorder group" data-tooltip-pos="bottom-right">
                     <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="5" r="1"/><circle cx="9" cy="12" r="1"/><circle cx="9" cy="19" r="1"/><circle cx="15" cy="5" r="1"/><circle cx="15" cy="12" r="1"/><circle cx="15" cy="19" r="1"/></svg>
@@ -1328,12 +1587,10 @@
                   <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0 text-indigo-400" data-tooltip="Custom terminal group" data-tooltip-pos="bottom-right"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
                   <span
                     class="truncate text-slate-200 select-none cursor-default"
-                    title="Double-click to expand/collapse"
-                    onclick={onTreeLabelClick}
-                    ondblclick={(e) => onTreeLabelDblClick(e, () => toggleGroupCollapse(group.id))}
+                    title="Click to expand/collapse"
                   >{group.name}</span>
                 </div>
-                <div class="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                <div class="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity" data-no-drag>
                   <div role="button" tabindex="0" data-tooltip="Edit terminal group variables" data-tooltip-pos="bottom-left" onclick={(e) => openVariables({ kind: 'terminalGroup', terminalGroupId: group.id }, `Variables · ${group.name}`, e)} onkeydown={(e) => e.key === 'Enter' && openVariables({ kind: 'terminalGroup', terminalGroupId: group.id }, `Variables · ${group.name}`)} class="p-0.5 text-slate-500 hover:text-cyan-400 rounded hover:bg-cyan-500/20 transition-colors">
                     <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9h16"/><path d="M4 15h16"/><path d="M10 3 8 21"/><path d="m16 3-2 18"/></svg>
                   </div>
@@ -1361,13 +1618,23 @@
                       {#if terminal}
                         <!-- Group Terminal row -->
                         <div
-                          class="mb-0.5 transition-all {dragOverItem?.type === 'group-terminal' && dragOverItem?.id === terminal.id ? 'border-t-2 border-indigo-400' : ''} {draggedItem?.type === 'group-terminal' && draggedItem?.id === terminal.id ? 'opacity-50' : ''}"
+                          class="relative mb-0.5 transition-all {isDraggingRow({ type: 'group-terminal', id: terminal.id, groupId: group.id }) ? 'opacity-50' : ''}"
                           draggable="true"
-                          ondragstart={(e) => handleDragStart(e, 'group-terminal', terminal.id, termIdx, undefined, undefined, terminal.id, group.id)}
-                          ondragover={(e) => handleDragOver(e, 'group-terminal', terminal.id, termIdx)}
-                          ondrop={(e) => handleDrop(e, 'group-terminal', termIdx)}
-                          ondragend={(e) => { e.stopPropagation(); draggedItem = null; dragOverItem = null; }}
+                          data-dnd-row
+                          data-dnd-type="group-terminal"
+                          data-dnd-id={terminal.id}
+                          data-dnd-index={termIdx}
+                          data-dnd-terminal={terminal.id}
+                          data-dnd-group={group.id}
+                          ondragstart={(e) => onDragStart(e, { type: 'group-terminal', id: terminal.id, index: termIdx, terminalId: terminal.id, groupId: group.id })}
+                          ondragover={(e) => onDragOver(e, { type: 'group-terminal', id: terminal.id, index: termIdx, groupId: group.id })}
+                          ondragleave={onDragLeave}
+                          ondrop={onDrop}
+                          ondragend={onDragEnd}
+                          onpointerdown={(e) => onPointerDown(e, { type: 'group-terminal', id: terminal.id, index: termIdx, terminalId: terminal.id, groupId: group.id })}
                         >
+                          {#if activeZoneFor('group-terminal', terminal.id) === 'before'}<div class="absolute top-0 left-0 right-0 h-0.5 bg-indigo-400 z-10 pointer-events-none"></div>{/if}
+                          {#if activeZoneFor('group-terminal', terminal.id) === 'after'}<div class="absolute bottom-0 left-0 right-0 h-0.5 bg-indigo-400 z-10 pointer-events-none"></div>{/if}
                           <button
                             class="w-full flex items-center justify-between px-2 py-1 rounded-md text-xs transition-all group {activeTerminalId === terminal.id ? 'bg-sky-500/10 text-sky-400 ring-1 ring-sky-500/30' : 'text-slate-400 hover:bg-white/5 hover:text-slate-200'}"
                             onclick={() => handleSelectTerminal(terminal.id)}
@@ -1380,7 +1647,7 @@
                               <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0" data-tooltip="Terminal session" data-tooltip-pos="bottom-right"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
                               <span class="truncate">{terminal.name}</span>
                             </div>
-                            <div class="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-all">
+                            <div class="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-all" data-no-drag>
                               <div role="button" tabindex="0" data-tooltip="Remove terminal from group" data-tooltip-pos="bottom-left" onclick={(e) => handleRemoveTerminalFromGroup(group.id, terminal.id, e)} onkeydown={(e) => e.key === 'Enter' && handleRemoveTerminalFromGroup(group.id, terminal.id, e)} class="p-0.5 text-slate-500 hover:text-rose-400 rounded hover:bg-rose-500/20 transition-colors">
                                 <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
                               </div>
@@ -1413,7 +1680,7 @@
                     <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0" data-tooltip="Terminal session" data-tooltip-pos="bottom-right"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
                     <span class="truncate">{terminal.name}</span>
                   </div>
-                  <div class="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-all">
+                  <div class="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-all" data-no-drag>
                     <div role="button" tabindex="0" data-tooltip="Unpin terminal" data-tooltip-pos="bottom-left" onclick={(e) => { e.stopPropagation(); toggleTerminalPinned(terminal.connId, terminal.projectId, terminal.id); }} onkeydown={(e) => e.key === 'Enter' && toggleTerminalPinned(terminal.connId, terminal.projectId, terminal.id)} class="p-0.5 text-amber-400 hover:text-amber-300 rounded hover:bg-amber-500/20 transition-colors">
                       <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"/></svg>
                     </div>
