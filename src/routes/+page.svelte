@@ -51,6 +51,13 @@
     removeTerminalFromGroup,
     reorderGroups,
     reorderGroupTerminals,
+    duplicateConnection,
+    duplicateProject,
+    duplicateProjectGroup,
+    duplicateTerminalTo,
+    duplicateSavedCommandTo,
+    duplicateGroup,
+    copyTerminalToGroup,
     getGridSettings,
     setGridLayout,
     toggleTerminalPinned,
@@ -167,6 +174,11 @@
   // it to suppress the synthetic click the drag raises.
   let pointerDragCommitted = false;
   let stopPointerDrag: (() => void) | null = null;
+  // True while shift is held during an active pointer drag — switches the
+  // drop from move to copy.
+  let dragCopy = $state(false);
+  // Cursor position during an active drag, for positioning the copy badge.
+  let dragCursorXY = $state<{ x: number; y: number } | null>(null);
 
   /** Active drop zone for a row, driven by the single shared dropState. Scoped
    *  by type too: a terminal can appear both in a project's terminal list and
@@ -206,11 +218,14 @@
     const drag = dragState;
     const over = dropState;
     if (!drag || !over) return;
+    const copy = dragCopy;
 
     // Identity guard — "drop onto self" is a no-op. Commands are scoped by
     // terminal and group-terminals by group, since the same id can appear in
-    // more than one container.
+    // more than one container. (In copy mode, self-drop in the same container
+    // is still allowed — it creates a duplicate right next to the original.)
     if (
+      !copy &&
       drag.id === over.targetId &&
       drag.type === over.targetType &&
       (drag.type !== 'command' || drag.terminalId === over.terminalId) &&
@@ -224,8 +239,13 @@
     const zone = over.zone;
     switch (drag.type) {
       case 'connection':
-        if (over.targetType === 'connection')
-          reorderConnections(drag.index, insertIndex(drag.index, over.targetIndex, zone));
+        if (over.targetType === 'connection') {
+          const toIndex = insertIndex(drag.index, over.targetIndex, zone);
+          if (copy)
+            duplicateConnection(drag.id, toIndex, true);
+          else
+            reorderConnections(drag.index, toIndex);
+        }
         break;
       case 'project':
         if (over.targetType === 'project') {
@@ -236,34 +256,57 @@
             : zone === 'before'
               ? over.targetIndex
               : over.targetIndex + 1;
-          moveProject(drag.id, over.connId!, over.groupId ?? null, toIndex);
+          if (copy)
+            duplicateProject(drag.id, over.connId!, over.groupId ?? null, toIndex, sameContainer);
+          else
+            moveProject(drag.id, over.connId!, over.groupId ?? null, toIndex);
         } else if (over.targetType === 'connection') {
-          // targetId is the connection's own id (the connection descriptor
-          // carries no connId — its id IS the connection id).
-          moveProject(drag.id, over.targetId, null, APPEND);
-          expandConnection(over.targetId);
+          if (copy)
+            duplicateProject(drag.id, over.targetId, null, APPEND, false);
+          else {
+            moveProject(drag.id, over.targetId, null, APPEND);
+            expandConnection(over.targetId);
+          }
         } else if (over.targetType === 'project-group') {
-          // targetId is the group id; connId is the group's connection.
-          moveProject(drag.id, over.connId!, over.targetId, APPEND);
-          expandProjectGroup(over.connId!, over.targetId);
+          if (copy)
+            duplicateProject(drag.id, over.connId!, over.targetId, APPEND, false);
+          else {
+            moveProject(drag.id, over.connId!, over.targetId, APPEND);
+            expandProjectGroup(over.connId!, over.targetId);
+          }
         }
         break;
       case 'project-group':
-        // Same-connection is enforced by allowedZones.
-        if (over.targetType === 'project-group')
-          reorderProjectGroups(drag.connId!, drag.index, insertIndex(drag.index, over.targetIndex, zone));
+        if (over.targetType === 'project-group') {
+          const toIndex = insertIndex(drag.index, over.targetIndex, zone);
+          if (copy)
+            duplicateProjectGroup(drag.connId!, drag.id, toIndex, true);
+          else
+            reorderProjectGroups(drag.connId!, drag.index, toIndex);
+        }
         break;
       case 'terminal':
         if (over.targetType === 'terminal') {
           if (drag.projectId === over.projectId) {
-            reorderTerminals(drag.connId!, drag.projectId!, drag.index, insertIndex(drag.index, over.targetIndex, zone));
+            const toIndex = insertIndex(drag.index, over.targetIndex, zone);
+            if (copy)
+              duplicateTerminalTo(drag.id, over.projectId!, toIndex, true);
+            else
+              reorderTerminals(drag.connId!, drag.projectId!, drag.index, toIndex);
           } else {
-            moveTerminal(drag.id, over.projectId!, zone === 'before' ? over.targetIndex : over.targetIndex + 1);
+            const toIndex = zone === 'before' ? over.targetIndex : over.targetIndex + 1;
+            if (copy)
+              duplicateTerminalTo(drag.id, over.projectId!, toIndex, false);
+            else
+              moveTerminal(drag.id, over.projectId!, toIndex);
           }
         } else if (over.targetType === 'project') {
-          // targetId is the project id; connId is the project's connection.
-          moveTerminal(drag.id, over.targetId, APPEND);
-          expandProject(over.connId!, over.targetId);
+          if (copy)
+            duplicateTerminalTo(drag.id, over.targetId, APPEND, false);
+          else {
+            moveTerminal(drag.id, over.targetId, APPEND);
+            expandProject(over.connId!, over.targetId);
+          }
         }
         break;
       case 'command':
@@ -274,22 +317,38 @@
             : zone === 'before'
               ? over.targetIndex
               : over.targetIndex + 1;
-          moveSavedCommand(drag.terminalId!, over.terminalId!, drag.id, toIndex);
+          if (copy)
+            duplicateSavedCommandTo(drag.terminalId!, drag.id, over.terminalId!, toIndex, sameTerminal);
+          else
+            moveSavedCommand(drag.terminalId!, over.terminalId!, drag.id, toIndex);
         } else if (over.targetType === 'terminal') {
-          // targetId is the terminal id; connId/projectId come from the
-          // terminal descriptor (needed to expand it after the drop).
-          moveSavedCommand(drag.terminalId!, over.targetId, drag.id, APPEND);
-          expandTerminal(over.connId!, over.projectId!, over.targetId);
+          if (copy)
+            duplicateSavedCommandTo(drag.terminalId!, drag.id, over.targetId, APPEND, false);
+          else {
+            moveSavedCommand(drag.terminalId!, over.targetId, drag.id, APPEND);
+            expandTerminal(over.connId!, over.projectId!, over.targetId);
+          }
         }
         break;
       case 'group':
-        if (over.targetType === 'group')
-          reorderGroups(drag.index, insertIndex(drag.index, over.targetIndex, zone));
+        if (over.targetType === 'group') {
+          const toIndex = insertIndex(drag.index, over.targetIndex, zone);
+          if (copy)
+            duplicateGroup(drag.id, toIndex, true);
+          else
+            reorderGroups(drag.index, toIndex);
+        }
         break;
       case 'group-terminal':
-        // Same-group is enforced by allowedZones.
-        if (over.targetType === 'group-terminal')
-          reorderGroupTerminals(drag.groupId!, drag.index, insertIndex(drag.index, over.targetIndex, zone));
+        if (over.targetType === 'group-terminal') {
+          if (copy) {
+            // Can't duplicate a terminal reference within the same group.
+            if (drag.groupId !== over.groupId)
+              copyTerminalToGroup(drag.id, over.groupId!, insertIndex(drag.index, over.targetIndex, zone));
+          } else {
+            reorderGroupTerminals(drag.groupId!, drag.index, insertIndex(drag.index, over.targetIndex, zone));
+          }
+        }
         break;
     }
 
@@ -342,11 +401,15 @@
         pointerDragCommitted = true;
         dragState = { type: desc.type, id: desc.id, index: desc.index, connId: desc.connId, projectId: desc.projectId, terminalId: desc.terminalId, groupId: desc.groupId };
       }
+      dragCopy = ev.shiftKey;
+      dragCursorXY = { x: ev.clientX, y: ev.clientY };
       const el = rowFromPoint(ev.clientX, ev.clientY);
       const t = el && descriptorFromDataset(el);
       // Can't drop on self — commands scoped by terminal, group-terminals by
-      // group (the same id can appear in more than one container).
+      // group (the same id can appear in more than one container). In copy
+      // mode, self-drop is allowed (creates a duplicate).
       const isSelf =
+        !dragCopy &&
         t != null &&
         t.type === desc.type &&
         t.id === desc.id &&
@@ -377,6 +440,8 @@
       stopPointerDrag = null;
       dragState = null;
       dropState = null;
+      dragCopy = false;
+      dragCursorXY = null;
     };
 
     stopPointerDrag?.();
@@ -1689,6 +1754,17 @@
       {/if}
     </div>
   </main>
+
+  <!-- Copy-mode badge during shift-drag -->
+  {#if dragState && dragCopy && dragCursorXY}
+    <div
+      class="fixed z-[200] pointer-events-none flex items-center gap-1 rounded-md bg-sky-500 px-1.5 py-0.5 text-[10px] font-bold text-white shadow-lg"
+      style="left: {dragCursorXY.x + 12}px; top: {dragCursorXY.y - 22}px;"
+    >
+      <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
+      Copy
+    </div>
+  {/if}
 
   <!-- Dialog -->
   {#if dialogState.isOpen}

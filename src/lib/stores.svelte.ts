@@ -371,6 +371,187 @@ export function duplicateSavedCommand(connId: string, projectId: string, termina
   return newCmd;
 }
 
+// --- Duplicate (copy) functions for shift-drag ---
+
+/** Deep-clone a project with fresh IDs on all children. */
+function cloneProject(project: Project, sameList: boolean): Project {
+  return {
+    id: uid(),
+    name: sameList ? `${project.name} (Copy)` : project.name,
+    terminals: project.terminals.map(t => cloneTerminal(t, sameList)),
+    collapsed: project.collapsed ?? false,
+    variables: { ...(project.variables ?? {}) },
+  };
+}
+
+/** Deep-clone a terminal with fresh command IDs. */
+function cloneTerminal(term: TerminalTab, sameList: boolean): TerminalTab {
+  const id = uid();
+  return {
+    id,
+    name: sameList ? `${term.name} (Copy)` : term.name,
+    tmuxSession: `td-${id}`,
+    workingDir: term.workingDir || '',
+    fontSize: term.fontSize || 14,
+    savedCommands: cloneSavedCommands(term.savedCommands),
+    collapsed: term.collapsed ?? true,
+    pinned: false,
+    gridHidden: term.gridHidden ?? false,
+    variables: { ...(term.variables ?? {}) },
+  };
+}
+
+export function duplicateConnection(connId: string, toIndex: number, sameList: boolean): Connection | null {
+  const source = connections.find(c => c.id === connId);
+  if (!source) return null;
+  const copy: Connection = {
+    id: uid(),
+    name: sameList ? `${source.name} (Copy)` : source.name,
+    wsUrl: source.wsUrl,
+    projects: source.projects.map(p => cloneProject(p, false)),
+    projectGroups: (source.projectGroups ?? []).map(pg => ({
+      id: uid(),
+      name: pg.name,
+      projects: pg.projects.map(p => cloneProject(p, false)),
+      collapsed: pg.collapsed ?? false,
+      variables: { ...(pg.variables ?? {}) },
+    })),
+    collapsed: false,
+    variables: { ...(source.variables ?? {}) },
+  };
+  const idx = Math.max(0, Math.min(toIndex, connections.length));
+  connections.splice(idx, 0, copy);
+  save();
+  return copy;
+}
+
+export function duplicateProject(
+  projectId: string,
+  targetConnId: string,
+  targetGroupId: string | null,
+  toIndex: number,
+  sameList: boolean,
+): Project | null {
+  const found = findProjectById(projectId);
+  if (!found) return null;
+  const destConn = connections.find(c => c.id === targetConnId);
+  if (!destConn) return null;
+
+  const copy = cloneProject(found.project, sameList);
+
+  if (targetGroupId) {
+    if (!destConn.projectGroups) destConn.projectGroups = [];
+    const destGroup = destConn.projectGroups.find(g => g.id === targetGroupId);
+    if (destGroup) {
+      const idx = Math.max(0, Math.min(toIndex, destGroup.projects.length));
+      destGroup.projects.splice(idx, 0, copy);
+    } else {
+      destConn.projects.push(copy);
+    }
+  } else {
+    const idx = Math.max(0, Math.min(toIndex, destConn.projects.length));
+    destConn.projects.splice(idx, 0, copy);
+  }
+  save();
+  return copy;
+}
+
+export function duplicateProjectGroup(
+  connId: string,
+  groupId: string,
+  toIndex: number,
+  sameList: boolean,
+): ProjectGroup | null {
+  const conn = connections.find(c => c.id === connId);
+  if (!conn || !conn.projectGroups) return null;
+  const source = conn.projectGroups.find(g => g.id === groupId);
+  if (!source) return null;
+
+  const copy: ProjectGroup = {
+    id: uid(),
+    name: sameList ? `${source.name} (Copy)` : source.name,
+    projects: source.projects.map(p => cloneProject(p, false)),
+    collapsed: false,
+    variables: { ...(source.variables ?? {}) },
+  };
+  const idx = Math.max(0, Math.min(toIndex, conn.projectGroups.length));
+  conn.projectGroups.splice(idx, 0, copy);
+  save();
+  return copy;
+}
+
+export function duplicateTerminalTo(
+  terminalId: string,
+  targetProjectId: string,
+  toIndex: number,
+  sameList: boolean,
+): TerminalTab | null {
+  const srcFound = findTerminalById(terminalId);
+  const destFound = findProjectById(targetProjectId);
+  if (!srcFound || !destFound) return null;
+
+  const copy = cloneTerminal(srcFound.terminal, sameList);
+  const idx = Math.max(0, Math.min(toIndex, destFound.project.terminals.length));
+  destFound.project.terminals.splice(idx, 0, copy);
+  save();
+  return copy;
+}
+
+export function duplicateSavedCommandTo(
+  sourceTerminalId: string,
+  commandId: string,
+  destTerminalId: string,
+  toIndex: number,
+  sameList: boolean,
+): SavedCommand | null {
+  const srcFound = findTerminalById(sourceTerminalId);
+  const destFound = findTerminalById(destTerminalId);
+  if (!srcFound || !destFound) return null;
+
+  const source = srcFound.terminal.savedCommands.find(c => c.id === commandId);
+  if (!source) return null;
+
+  const newCmd: SavedCommand = {
+    ...source,
+    id: uid(),
+    label: sameList ? `${source.label} (Copy)` : source.label,
+  };
+  const idx = Math.max(0, Math.min(toIndex, destFound.terminal.savedCommands.length));
+  destFound.terminal.savedCommands.splice(idx, 0, newCmd);
+  save();
+  return newCmd;
+}
+
+export function duplicateGroup(groupId: string, toIndex: number, sameList: boolean): TerminalGroup | null {
+  const source = terminalGroups.find(g => g.id === groupId);
+  if (!source) return null;
+
+  const copy: TerminalGroup = {
+    id: uid(),
+    name: sameList ? `${source.name} (Copy)` : source.name,
+    terminalIds: [...source.terminalIds],
+    collapsed: false,
+    variables: { ...(source.variables ?? {}) },
+  };
+  const idx = Math.max(0, Math.min(toIndex, terminalGroups.length));
+  terminalGroups.splice(idx, 0, copy);
+  saveGroups();
+  return copy;
+}
+
+export function copyTerminalToGroup(
+  terminalId: string,
+  targetGroupId: string,
+  toIndex: number,
+): void {
+  const group = terminalGroups.find(g => g.id === targetGroupId);
+  if (!group) return;
+  if (group.terminalIds.includes(terminalId)) return;
+  const idx = Math.max(0, Math.min(toIndex, group.terminalIds.length));
+  group.terminalIds.splice(idx, 0, terminalId);
+  saveGroups();
+}
+
 // --- Connection CRUD ---
 
 export function getConnections(): Connection[] {
