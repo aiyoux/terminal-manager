@@ -270,7 +270,10 @@ export function importState(json: string): boolean {
 // --- Reordering ---
 
 function moveItem<T>(arr: T[], fromIndex: number, toIndex: number) {
-  if (toIndex < 0 || toIndex >= arr.length) return;
+  // Allow toIndex === arr.length (append at end). The pre-splice length is
+  // checked here; after removing the source the array is one shorter, so an
+  // append index equal to the original length lands at the new tail.
+  if (toIndex < 0 || toIndex > arr.length) return;
   const item = arr.splice(fromIndex, 1)[0];
   arr.splice(toIndex, 0, item);
 }

@@ -110,7 +110,7 @@ export function allowedZones(
 
 /**
  * Post-removal insertion index for a same-list sibling reorder, validated
- * against `moveItem`'s `if (toIndex < 0 || toIndex >= arr.length) return`
+ * against `moveItem`'s `if (toIndex < 0 || toIndex > arr.length) return`
  * guard (which checks `toIndex` against the ORIGINAL pre-splice length).
  *
  * For non-self drops the result always falls in `[0, n-1]`, so the guard never
