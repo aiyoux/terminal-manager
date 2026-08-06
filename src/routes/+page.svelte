@@ -1401,37 +1401,12 @@
                                           </div>
                                         </div>
                                       {/each}
-                                      {#if dragState && terminal.savedCommands.length > 0}
-                                        <div
-                                          class="h-4 rounded-md transition-colors {activeZoneFor('command', `append-commands-${terminal.id}`) ? 'bg-emerald-500/15 ring-1 ring-emerald-500/30' : ''}"
-                                          data-dnd-row
-                                          data-dnd-type="command"
-                                          data-dnd-id={`append-commands-${terminal.id}`}
-                                          data-dnd-index={terminal.savedCommands.length}
-                                          data-dnd-conn={connId}
-                                          data-dnd-project={project.id}
-                                          data-dnd-terminal={terminal.id}
-                                          data-dnd-append="1"
-                                        ></div>
-                                      {/if}
                                     {/if}
                                   </div>
                                 </div>
                               {/if}
                             </div>
                           {/each}
-                          {#if dragState && project.terminals.length > 0}
-                            <div
-                              class="h-4 rounded-md transition-colors {activeZoneFor('terminal', `append-terminals-${project.id}`) ? 'bg-sky-400/15 ring-1 ring-sky-400/30' : ''}"
-                              data-dnd-row
-                              data-dnd-type="terminal"
-                              data-dnd-id={`append-terminals-${project.id}`}
-                              data-dnd-index={project.terminals.length}
-                              data-dnd-conn={connId}
-                              data-dnd-project={project.id}
-                              data-dnd-append="1"
-                            ></div>
-                          {/if}
                         </div>
                       {/if}
                     </div>
@@ -1491,65 +1466,21 @@
                               {#each group.projects as project, projIdx (project.id)}
                                 {@render projectSnippet(conn.id, project, projIdx, group.id)}
                               {/each}
-                              {#if dragState && group.projects.length > 0}
-                                <div
-                                  class="h-4 rounded-md transition-colors {activeZoneFor('project', `append-projects-${conn.id}-${group.id}`) ? 'bg-amber-500/15 ring-1 ring-amber-500/30' : ''}"
-                                  data-dnd-row
-                                  data-dnd-type="project"
-                                  data-dnd-id={`append-projects-${conn.id}-${group.id}`}
-                                  data-dnd-index={group.projects.length}
-                                  data-dnd-conn={conn.id}
-                                  data-dnd-group={group.id}
-                                  data-dnd-append="1"
-                                ></div>
-                              {/if}
                             {/if}
                           </div>
                         {/if}
                       </div>
                     {/each}
-                    {#if dragState && conn.projectGroups.length > 0}
-                      <div
-                        class="h-4 rounded-md transition-colors {activeZoneFor('project-group', `append-project-groups-${conn.id}`) ? 'bg-violet-500/15 ring-1 ring-violet-500/30' : ''}"
-                        data-dnd-row
-                        data-dnd-type="project-group"
-                        data-dnd-id={`append-project-groups-${conn.id}`}
-                        data-dnd-index={conn.projectGroups.length}
-                        data-dnd-conn={conn.id}
-                        data-dnd-append="1"
-                      ></div>
-                    {/if}
                   {/if}
 
                   <!-- Ungrouped projects -->
                   {#each conn.projects as project, projIdx (project.id)}
                     {@render projectSnippet(conn.id, project, projIdx, undefined)}
                   {/each}
-                  {#if dragState && conn.projects.length > 0}
-                    <div
-                      class="h-4 rounded-md transition-colors {activeZoneFor('project', `append-projects-${conn.id}`) ? 'bg-amber-500/15 ring-1 ring-amber-500/30' : ''}"
-                      data-dnd-row
-                      data-dnd-type="project"
-                      data-dnd-id={`append-projects-${conn.id}`}
-                      data-dnd-index={conn.projects.length}
-                      data-dnd-conn={conn.id}
-                      data-dnd-append="1"
-                    ></div>
-                  {/if}
                 </div>
               {/if}
             </div>
           {/each}
-          {#if dragState && connections.length > 0}
-            <div
-              class="h-4 rounded-md transition-colors {activeZoneFor('connection', 'append-connections') ? 'bg-sky-500/15 ring-1 ring-sky-500/30' : ''}"
-              data-dnd-row
-              data-dnd-type="connection"
-              data-dnd-id="append-connections"
-              data-dnd-index={connections.length}
-              data-dnd-append="1"
-            ></div>
-          {/if}
         {:else if activeSidebarTab === 'groups'}
           <div class="text-[10px] font-bold uppercase tracking-widest text-slate-500 mb-3 px-2">Groups</div>
           {#each terminalGroups as group, groupIdx (group.id)}
@@ -1635,32 +1566,11 @@
                         </div>
                       {/if}
                     {/each}
-                    {#if dragState && group.terminalIds.length > 0}
-                      <div
-                        class="h-4 rounded-md transition-colors {activeZoneFor('group-terminal', `append-group-terminals-${group.id}`) ? 'bg-indigo-400/15 ring-1 ring-indigo-400/30' : ''}"
-                        data-dnd-row
-                        data-dnd-type="group-terminal"
-                        data-dnd-id={`append-group-terminals-${group.id}`}
-                        data-dnd-index={group.terminalIds.length}
-                        data-dnd-group={group.id}
-                        data-dnd-append="1"
-                      ></div>
-                    {/if}
                   {/if}
                 </div>
               {/if}
             </div>
           {/each}
-          {#if dragState && terminalGroups.length > 0}
-            <div
-              class="h-4 rounded-md transition-colors {activeZoneFor('group', 'append-groups') ? 'bg-indigo-500/15 ring-1 ring-indigo-500/30' : ''}"
-              data-dnd-row
-              data-dnd-type="group"
-              data-dnd-id="append-groups"
-              data-dnd-index={terminalGroups.length}
-              data-dnd-append="1"
-            ></div>
-          {/if}
         {:else if activeSidebarTab === 'pinned'}
           <div class="text-[10px] font-bold uppercase tracking-widest text-slate-500 mb-3 px-2">Pinned Terminals</div>
           {#if pinnedTerminals.length === 0}
