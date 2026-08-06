@@ -5,7 +5,7 @@ import { test, expect } from '@playwright/test';
  * - Shared delete confirmation modal
  * - Terminal header command chips + gear settings popup
  * - Command action icon view toggle (default hidden)
- * - Double-click tree labels to expand/collapse
+ * - Single-click tree rows to expand/collapse (click-vs-drag guarded)
  * - Store APIs used by those UIs (incl. isOnConnect on add/update)
  */
 test.describe('Session features regression', () => {
@@ -426,10 +426,10 @@ test.describe('Session features regression', () => {
     await expect(settingsDialog).toHaveCount(0);
   });
 
-  test('UI: double-click connection name toggles collapse like chevron', async ({ page }) => {
+  test('UI: single-click connection row toggles collapse (whole bar, not just label)', async ({ page }) => {
     const setup = await page.evaluate(async () => {
       const stores = await import('/src/lib/stores.svelte.ts');
-      const conn = stores.addConnection('DblClick Conn', 'ws://127.0.0.1:9992/ws');
+      const conn = stores.addConnection('Click Conn', 'ws://127.0.0.1:9992/ws');
       if (!conn) return null;
       // Start expanded
       if (conn.collapsed) stores.toggleConnectionCollapse(conn.id);
@@ -447,8 +447,10 @@ test.describe('Session features regression', () => {
       if (conn?.collapsed) stores.toggleConnectionCollapse(id);
     }, setup!.id);
 
-    const nameSpan = page.locator('span', { hasText: setup!.name }).first();
-    await expect(nameSpan).toBeVisible({ timeout: 10_000 });
+    // The whole bar button is the click target — clicking it (not just the
+    // label span) toggles collapse. Single click, not double.
+    const connRow = page.locator('button', { hasText: setup!.name }).first();
+    await expect(connRow).toBeVisible({ timeout: 10_000 });
 
     const before = await page.evaluate((id) => {
       return import('/src/lib/stores.svelte.ts').then((stores) => {
@@ -457,7 +459,7 @@ test.describe('Session features regression', () => {
       });
     }, setup!.id);
 
-    await nameSpan.dblclick();
+    await connRow.click();
 
     const after = await page.evaluate((id) => {
       return import('/src/lib/stores.svelte.ts').then((stores) => {
@@ -467,5 +469,57 @@ test.describe('Session features regression', () => {
     }, setup!.id);
 
     expect(after).toBe(!before);
+  });
+
+  test('UI: a drag past the threshold does not toggle collapse', async ({ page }) => {
+    const setup = await page.evaluate(async () => {
+      const stores = await import('/src/lib/stores.svelte.ts');
+      const conn = stores.addConnection('DragNoToggle Conn', 'ws://127.0.0.1:9991/ws');
+      if (!conn) return null;
+      if (conn.collapsed) stores.toggleConnectionCollapse(conn.id);
+      stores.addProject(conn.id, 'Child Proj Drag');
+      return { id: conn.id, name: conn.name };
+    });
+    expect(setup).not.toBeNull();
+
+    await page.reload();
+    await expect(page.locator('body')).toBeVisible();
+
+    await page.evaluate(async (id) => {
+      const stores = await import('/src/lib/stores.svelte.ts');
+      const conn = stores.getConnections().find((c: { id: string }) => c.id === id);
+      if (conn?.collapsed) stores.toggleConnectionCollapse(id);
+    }, setup!.id);
+
+    const connRow = page.locator('button', { hasText: setup!.name }).first();
+    await expect(connRow).toBeVisible({ timeout: 10_000 });
+
+    const before = await page.evaluate((id) => {
+      return import('/src/lib/stores.svelte.ts').then((stores) => {
+        const c = stores.getConnections().find((x: { id: string }) => x.id === id);
+        return !!c?.collapsed;
+      });
+    }, setup!.id);
+
+    // Press in the bar, drag well past ROW_DRAG_THRESHOLD (6px), release. The
+    // click is suppressed by the pointer-down-vs-up distance check, so collapse
+    // must not toggle (the HTML5 drag that may start is irrelevant to collapse).
+    const box = await connRow.boundingBox();
+    expect(box).not.toBeNull();
+    const startX = box!.x + 8;
+    const startY = box!.y + box!.height / 2;
+    await page.mouse.move(startX, startY);
+    await page.mouse.down();
+    await page.mouse.move(startX + 80, startY, { steps: 8 });
+    await page.mouse.up();
+
+    const after = await page.evaluate((id) => {
+      return import('/src/lib/stores.svelte.ts').then((stores) => {
+        const c = stores.getConnections().find((x: { id: string }) => x.id === id);
+        return !!c?.collapsed;
+      });
+    }, setup!.id);
+
+    expect(after).toBe(before);
   });
 });
