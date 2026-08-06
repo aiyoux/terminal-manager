@@ -107,7 +107,7 @@ function migrateTerminal(t: any): TerminalTab {
     }
     delete t.startupCommand;
   }
-  if (t.collapsed === undefined) t.collapsed = true;
+  t.collapsed = true;
   t.variables = sanitizeVariables(t.variables);
   return t as TerminalTab;
 }
