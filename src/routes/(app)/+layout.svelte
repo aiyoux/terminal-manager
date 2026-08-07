@@ -1880,10 +1880,10 @@
       ></div>
     {/if}
 
-    <!-- Terminal Workspace -->
+    <!-- Terminal Workspace — flush edge-to-edge in single and grid views -->
     <div
       bind:this={workspaceEl}
-      class="flex-1 min-w-0 relative {gridViewProjectId ? 'bg-slate-950 p-0' : 'bg-slate-900/30 p-3'}"
+      class="flex-1 min-w-0 relative bg-slate-950 p-0"
       class:grid-mode={!!gridViewProjectId}
       class:overflow-hidden={!gridViewProjectId || !currentGridConfig.rows}
       class:overflow-y-auto={!!gridViewProjectId && !!currentGridConfig.rows}
@@ -1922,7 +1922,8 @@
                 projectId={t.projectId}
                 savedCommands={t.savedCommands}
                 pinned={t.pinned}
-                dense={!!gridViewProjectId && isVisible}
+                dense={true}
+                gridCell={!!gridViewProjectId && isVisible}
                 onAddToGroup={() => handleAddToGroupPrompt(t.id)}
                 onTogglePin={() => toggleTerminalPinned(t.connId, t.projectId, t.id)}
                 onResolveError={(msg) => { void showAlert(msg); }}
@@ -2103,13 +2104,14 @@
     visibility: hidden;
     pointer-events: none;
     position: absolute;
-    inset: 0.75rem;
+    inset: 0;
     z-index: -10;
   }
 
+  /* Single-terminal view fills the workspace with no margin/padding gap. */
   :global(.terminal-visible.terminal-single) {
     position: absolute;
-    inset: 0.75rem;
+    inset: 0;
   }
 
   /* Dense grid: zero gap/padding; cells share single borders (top/left on
