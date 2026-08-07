@@ -136,8 +136,10 @@
   );
   let activeGroup = $derived(terminalGroups.find((g) => g.id === activeGroupId) ?? null);
 
-  // Legacy /groups → first group (or connections if none)
+  // Legacy /groups → first group (or connections if none). Wait for store load
+  // so we do not bounce away before profiles hydrate from IndexedDB.
   $effect(() => {
+    if (!isLoaded()) return;
     const path = page.url.pathname;
     if (path !== '/groups' && path !== '/groups/') return;
     const first = terminalGroups[0];
@@ -145,8 +147,9 @@
     else void goto('/connections', { replaceState: true });
   });
 
-  // If the open group was deleted, leave the route
+  // If the open group was deleted, leave the route (only after load).
   $effect(() => {
+    if (!isLoaded()) return;
     if (navKind !== 'group' || !activeGroupId) return;
     if (!terminalGroups.some((g) => g.id === activeGroupId)) {
       void goto('/connections', { replaceState: true });
