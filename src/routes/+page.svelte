@@ -168,35 +168,58 @@
     append?: boolean;
   };
 
-  let dragState = $state<DragState | null>(null);
-  let dropState = $state<DropState | null>(null);
-  // True once a pointer drag has activated and committed — onRowClick consumes
-  // it to suppress the synthetic click the drag raises.
+  // Drag bookkeeping is plain JS + DOM paints — NOT $state — so pointermove
+  // never re-renders +page (and all xterms). Only the final commit mutates stores.
   let pointerDragCommitted = false;
   let stopPointerDrag: (() => void) | null = null;
-  // True while shift is held during an active pointer drag — switches the
-  // drop from move to copy.
-  let dragCopy = $state(false);
-  // Copy-mode badge: positioned via direct DOM during drag so we don't write
-  // $state on every pointermove (that re-rendered the whole page + terminals).
   let copyBadgeEl: HTMLElement | null = null;
+  let liveDrop: DropState | null = null;
+  let liveDropEl: HTMLElement | null = null;
+  let dragSourceEl: HTMLElement | null = null;
+  /** True while a tree drag is active (for workspace pointer-events). DOM-driven. */
+  let treeDragActive = false;
 
-  /** Active drop zone for a row, driven by the single shared dropState. Scoped
-   *  by type too: a terminal can appear both in a project's terminal list and
-   *  in a group's terminalIds, so keying on id alone would light up both rows. */
-  function activeZoneFor(rowType: DragType, rowId: string): Zone | null {
-    return dropState?.targetType === rowType && dropState?.targetId === rowId ? dropState.zone : null;
+  const ZONE_CLASSES = ['dnd-zone-before', 'dnd-zone-after', 'dnd-zone-into'] as const;
+
+  function clearDropPaint() {
+    if (liveDropEl) {
+      liveDropEl.classList.remove(...ZONE_CLASSES);
+      liveDropEl = null;
+    }
+    liveDrop = null;
   }
 
-  /** Is this row the one currently being dragged? Commands are scoped by
-   *  terminal and group-terminals by group (the same id can appear in more
-   *  than one container), so only the dragged instance goes opaque. The
-   *  markup calls omit `index` — only type/id/(terminalId|groupId) are used. */
-  function isDraggingRow(desc: { type: DragType; id: string; terminalId?: string; groupId?: string }): boolean {
-    if (!dragState || dragState.type !== desc.type || dragState.id !== desc.id) return false;
-    if (desc.type === 'command' && dragState.terminalId !== desc.terminalId) return false;
-    if (desc.type === 'group-terminal' && dragState.groupId !== desc.groupId) return false;
-    return true;
+  function paintDrop(el: HTMLElement | null, drop: DropState | null) {
+    if (
+      liveDropEl === el &&
+      ((liveDrop === null && drop === null) ||
+        (liveDrop &&
+          drop &&
+          liveDrop.targetType === drop.targetType &&
+          liveDrop.targetId === drop.targetId &&
+          liveDrop.targetIndex === drop.targetIndex &&
+          liveDrop.zone === drop.zone &&
+          liveDrop.connId === drop.connId &&
+          liveDrop.groupId === drop.groupId &&
+          liveDrop.projectId === drop.projectId &&
+          liveDrop.terminalId === drop.terminalId))
+    ) {
+      return;
+    }
+    if (liveDropEl && liveDropEl !== el) {
+      liveDropEl.classList.remove(...ZONE_CLASSES);
+    } else if (liveDropEl && liveDropEl === el) {
+      liveDropEl.classList.remove(...ZONE_CLASSES);
+    }
+    liveDrop = drop;
+    liveDropEl = el;
+    if (el && drop) el.classList.add(`dnd-zone-${drop.zone}`);
+  }
+
+  function setTreeDragActive(active: boolean) {
+    treeDragActive = active;
+    document.body.classList.toggle('tree-dnd-active', active);
+    if (workspaceEl) workspaceEl.classList.toggle('pointer-events-none', active || isResizingSidebar);
   }
 
   function expandConnection(connId: string) {
@@ -214,12 +237,9 @@
       toggleTerminalCollapse(_connId, _projectId, terminalId);
   }
 
-  /** Commit the current drag onto its drop target. Reads dragState + dropState. */
-  function commitDrop() {
-    const drag = dragState;
-    const over = dropState;
+  /** Commit the current drag onto its drop target. */
+  function commitDrop(drag: DragState, over: DropState | null, copy: boolean) {
     if (!drag || !over) return;
-    const copy = dragCopy;
 
     // Identity guard — "drop onto self" is a no-op. Commands are scoped by
     // terminal and group-terminals by group, since the same id can appear in
@@ -232,8 +252,6 @@
       (drag.type !== 'command' || drag.terminalId === over.terminalId) &&
       (drag.type !== 'group-terminal' || drag.groupId === over.groupId)
     ) {
-      dragState = null;
-      dropState = null;
       return;
     }
 
@@ -352,9 +370,6 @@
         }
         break;
     }
-
-    dragState = null;
-    dropState = null;
   }
 
   // --- Pointer drag path (mouse / touch / pen) ---
@@ -407,28 +422,6 @@
     );
   }
 
-  /** Only write dropState when the target/zone actually changed — assigning a
-   *  fresh object every pointermove forced a full +page re-render (all xterms). */
-  function setDropState(next: DropState | null) {
-    const prev = dropState;
-    if (prev === next) return;
-    if (
-      prev &&
-      next &&
-      prev.targetType === next.targetType &&
-      prev.targetId === next.targetId &&
-      prev.targetIndex === next.targetIndex &&
-      prev.zone === next.zone &&
-      prev.connId === next.connId &&
-      prev.groupId === next.groupId &&
-      prev.projectId === next.projectId &&
-      prev.terminalId === next.terminalId
-    ) {
-      return;
-    }
-    dropState = next;
-  }
-
   function positionCopyBadge(x: number, y: number, show: boolean) {
     const el = copyBadgeEl;
     if (!el) return;
@@ -451,64 +444,63 @@
     let liveCopy = false;
     const startX = e.clientX;
     const startY = e.clientY;
+    const sourceEl = e.currentTarget instanceof HTMLElement ? e.currentTarget : null;
+    const drag: DragState = {
+      type: desc.type,
+      id: desc.id,
+      index: desc.index,
+      connId: desc.connId,
+      projectId: desc.projectId,
+      terminalId: desc.terminalId,
+      groupId: desc.groupId,
+    };
 
     const move = (ev: PointerEvent) => {
       if (!activated) {
         if (Math.hypot(ev.clientX - startX, ev.clientY - startY) <= ROW_DRAG_THRESHOLD) return;
         activated = true;
         pointerDragCommitted = true;
-        dragState = { type: desc.type, id: desc.id, index: desc.index, connId: desc.connId, projectId: desc.projectId, terminalId: desc.terminalId, groupId: desc.groupId };
+        dragSourceEl = sourceEl;
+        sourceEl?.classList.add('dnd-dragging');
+        setTreeDragActive(true);
       }
 
-      // Only touch $state when shift-copy mode flips (rare). Cursor badge is DOM-only.
       const nextCopy = ev.shiftKey;
-      if (nextCopy !== liveCopy) {
-        liveCopy = nextCopy;
-        dragCopy = nextCopy;
-      }
+      if (nextCopy !== liveCopy) liveCopy = nextCopy;
       positionCopyBadge(ev.clientX, ev.clientY, liveCopy);
 
-      // Walk up from the innermost data-dnd-row to find a row that accepts a
-      // drop for the current drag type. Without this, dragging a terminal over
-      // expanded command rows hits a command (no allowed zones for a terminal
-      // drag) and the drop would silently fail.
-      //
-      // Important: when the accepting row is an *ancestor* of the hit target
-      // (pointer is in expanded children under that row's header), force zone
-      // `after` so open command lists don't trap the drop in the geometric
-      // top-half "before" zone of the tall wrapper.
+      // Walk up from the innermost data-dnd-row to find a compatible target.
+      // When the accepting row is an ancestor (pointer in expanded children),
+      // force zone `after` so open command lists don't trap drops as "before".
       const hitEl = rowFromPoint(ev.clientX, ev.clientY);
       let el: HTMLElement | null = hitEl;
       let t = el && descriptorFromDataset(el);
       let walkedUp = false;
       if (t) {
-        let self = !liveCopy && isSelfDrop(desc, t);
-        let allowed = self ? [] : allowedZones(dragState!, { targetType: t.type, connId: t.connId, groupId: t.groupId });
+        let self = !liveCopy && isSelfDrop(drag, t);
+        let allowed = self ? [] : allowedZones(drag, { targetType: t.type, connId: t.connId, groupId: t.groupId });
         while ((self || allowed.length === 0) && el) {
           el = parentDndRow(el);
           walkedUp = true;
           t = el && descriptorFromDataset(el);
           if (!t) break;
-          self = !liveCopy && isSelfDrop(desc, t);
-          allowed = self ? [] : allowedZones(dragState!, { targetType: t.type, connId: t.connId, groupId: t.groupId });
+          self = !liveCopy && isSelfDrop(drag, t);
+          allowed = self ? [] : allowedZones(drag, { targetType: t.type, connId: t.connId, groupId: t.groupId });
         }
       }
       if (!t || !el) {
-        setDropState(null);
+        paintDrop(null, null);
         return;
       }
-      if (!liveCopy && isSelfDrop(desc, t)) {
-        setDropState(null);
+      if (!liveCopy && isSelfDrop(drag, t)) {
+        paintDrop(null, null);
         return;
       }
-      const allowed = allowedZones(dragState!, { targetType: t.type, connId: t.connId, groupId: t.groupId });
+      const allowed = allowedZones(drag, { targetType: t.type, connId: t.connId, groupId: t.groupId });
       if (allowed.length === 0) {
-        setDropState(null);
+        paintDrop(null, null);
         return;
       }
-      // Synthetic append zone always means "drop at end".
-      // Otherwise use the header bar rect; if we walked up from nested content
-      // (or the pointer is below the bar), treat sibling drops as `after`.
       let zone: Zone | null;
       if (t.append) {
         zone = 'after';
@@ -518,10 +510,11 @@
         zone = pickZone(bar, ev.clientY, allowed, { expandedBelow });
       }
       if (!zone) {
-        setDropState(null);
+        paintDrop(null, null);
         return;
       }
-      setDropState({
+      // DOM-only indicator paint — no $state, no Svelte re-render.
+      paintDrop(el, {
         targetType: t.type,
         targetId: t.id,
         targetIndex: t.index,
@@ -534,17 +527,18 @@
     };
 
     const finish = () => {
-      if (activated) commitDrop();
+      if (activated) commitDrop(drag, liveDrop, liveCopy);
       stopPointerDrag?.();
       stopPointerDrag = null;
-      dragState = null;
-      dropState = null;
-      dragCopy = false;
+      sourceEl?.classList.remove('dnd-dragging');
+      dragSourceEl = null;
+      clearDropPaint();
+      setTreeDragActive(false);
       positionCopyBadge(0, 0, false);
     };
 
     stopPointerDrag?.();
-    document.addEventListener('pointermove', move);
+    document.addEventListener('pointermove', move, { passive: true });
     document.addEventListener('pointerup', finish, { once: true });
     document.addEventListener('pointercancel', finish, { once: true });
     stopPointerDrag = () => {
@@ -596,42 +590,56 @@
 
   function startSidebarResize(e: MouseEvent) {
     e.preventDefault();
+    // One $state flip for select-none; width itself is pure DOM + rAF so the
+    // handle tracks the pointer without waiting on Svelte/xterm.
     isResizingSidebar = true;
     const startX = e.clientX;
     const startWidth = sidebarWidth;
     let latest = startWidth;
+    let raf = 0;
     const el = sidebarEl;
     const ws = workspaceEl;
-    // Direct DOM width updates during drag — avoid $state on every mousemove
-    // (that re-rendered the whole page + all terminals and felt very laggy).
-    // Freeze the workspace pixel size so xterm ResizeObservers don't fire on
-    // every pixel of the drag (they're expensive).
-    if (el) el.style.width = startWidth + 'px';
+    if (el) {
+      el.style.transition = 'none';
+      el.style.width = startWidth + 'px';
+    }
     if (ws) {
       const frozen = ws.getBoundingClientRect().width;
       ws.style.flex = 'none';
       ws.style.width = frozen + 'px';
+      ws.classList.add('pointer-events-none');
     }
+    document.body.classList.add('select-none');
 
     function onMouseMove(ev: MouseEvent) {
       latest = Math.max(200, Math.min(600, startWidth + (ev.clientX - startX)));
-      if (el) el.style.width = latest + 'px';
+      if (raf) return;
+      raf = requestAnimationFrame(() => {
+        raf = 0;
+        if (el) el.style.width = latest + 'px';
+      });
     }
 
     function onMouseUp() {
-      // Commit once — reactive style binding takes over on re-render.
+      if (raf) cancelAnimationFrame(raf);
+      if (el) {
+        el.style.width = latest + 'px';
+        el.style.transition = '';
+      }
       sidebarWidth = latest;
       isResizingSidebar = false;
       if (ws) {
         ws.style.flex = '';
         ws.style.width = '';
+        if (!treeDragActive) ws.classList.remove('pointer-events-none');
       }
+      document.body.classList.remove('select-none');
       window.removeEventListener('mousemove', onMouseMove);
       window.removeEventListener('mouseup', onMouseUp);
     }
 
-    window.addEventListener('mousemove', onMouseMove);
-    window.addEventListener('mouseup', onMouseUp);
+    window.addEventListener('mousemove', onMouseMove, { passive: true });
+    window.addEventListener('mouseup', onMouseUp, { once: true });
   }
 
   // Grid view state
@@ -1307,15 +1315,13 @@
 
           {#each connections as conn, connIdx (conn.id)}
             <div
-              class="relative mb-2 transition-all {isDraggingRow({ type: 'connection', id: conn.id }) ? 'opacity-50' : ''} {activeZoneFor('connection', conn.id) === 'into' ? 'bg-sky-500/10 rounded-md ring-1 ring-sky-500/30' : ''}"
+              class="relative mb-2"
               data-dnd-row
               data-dnd-type="connection"
               data-dnd-id={conn.id}
               data-dnd-index={connIdx}
               onpointerdown={(e) => onPointerDown(e, { type: 'connection', id: conn.id, index: connIdx })}
             >
-              {#if activeZoneFor('connection', conn.id) === 'before'}<div class="absolute top-0 left-0 right-0 h-0.5 bg-sky-500 z-10 pointer-events-none"></div>{/if}
-              {#if activeZoneFor('connection', conn.id) === 'after'}<div class="absolute bottom-0 left-0 right-0 h-0.5 bg-sky-500 z-10 pointer-events-none"></div>{/if}
               <button data-dnd-bar class="tree-row relative w-full flex items-center px-2 py-1.5 rounded-lg text-xs font-semibold transition-colors hover:bg-white/5 group" onpointerdown={onRowPointerDown} onclick={(e) => onRowClick(e, () => toggleConnectionCollapse(conn.id))}>
                 <div class="tree-row-label gap-2">
                   <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0 text-sky-400 transition-transform {conn.collapsed ? '-rotate-90' : ''}" data-tooltip={conn.collapsed ? 'Expand connection' : 'Collapse connection'} data-tooltip-pos="bottom-right"><polyline points="6 9 12 15 18 9"/></svg>
@@ -1350,7 +1356,7 @@
 
                   {#snippet projectSnippet(connId, project, projIdx, groupId)}
                     <div
-                      class="relative mb-1 transition-all {isDraggingRow({ type: 'project', id: project.id }) ? 'opacity-50' : ''} {activeZoneFor('project', project.id) === 'into' ? 'bg-sky-500/10 rounded-md ring-1 ring-sky-500/30' : ''}"
+                      class="relative mb-1"
                       data-dnd-row
                       data-dnd-type="project"
                       data-dnd-id={project.id}
@@ -1359,8 +1365,6 @@
                       data-dnd-group={groupId}
                       onpointerdown={(e) => onPointerDown(e, { type: 'project', id: project.id, index: projIdx, connId, groupId })}
                     >
-                      {#if activeZoneFor('project', project.id) === 'before'}<div class="absolute top-0 left-0 right-0 h-0.5 bg-amber-500 z-10 pointer-events-none"></div>{/if}
-                      {#if activeZoneFor('project', project.id) === 'after'}<div class="absolute bottom-0 left-0 right-0 h-0.5 bg-amber-500 z-10 pointer-events-none"></div>{/if}
                       <button data-dnd-bar class="tree-row relative w-full flex items-center px-2 py-1 rounded-md text-xs transition-colors hover:bg-white/5 group" onpointerdown={onRowPointerDown} onclick={(e) => onRowClick(e, () => toggleProjectCollapse(connId, project.id))}>
                         <div class="tree-row-label gap-2">
                           <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0 text-amber-400 transition-transform {project.collapsed ? '-rotate-90' : ''}" data-tooltip={project.collapsed ? 'Expand project' : 'Collapse project'} data-tooltip-pos="bottom-right"><polyline points="6 9 12 15 18 9"/></svg>
@@ -1399,7 +1403,7 @@
                             {@const isConn = !!connectionStatuses[terminal.id]}
                             <!-- Terminal row -->
                             <div
-                              class="relative mb-0.5 transition-all {isDraggingRow({ type: 'terminal', id: terminal.id }) ? 'opacity-50' : ''} {activeZoneFor('terminal', terminal.id) === 'into' ? 'bg-emerald-500/10 rounded-md ring-1 ring-emerald-500/30' : ''}"
+                              class="relative mb-0.5"
                               data-dnd-row
                               data-dnd-type="terminal"
                               data-dnd-id={terminal.id}
@@ -1408,8 +1412,6 @@
                               data-dnd-project={project.id}
                               onpointerdown={(e) => onPointerDown(e, { type: 'terminal', id: terminal.id, index: termIdx, connId, projectId: project.id })}
                             >
-                              {#if activeZoneFor('terminal', terminal.id) === 'before'}<div class="absolute top-0 left-0 right-0 h-0.5 bg-sky-400 z-10 pointer-events-none"></div>{/if}
-                              {#if activeZoneFor('terminal', terminal.id) === 'after'}<div class="absolute bottom-0 left-0 right-0 h-0.5 bg-sky-400 z-10 pointer-events-none"></div>{/if}
                               <button
                                 data-dnd-bar
                                 class="tree-row relative w-full flex items-center px-2 py-1 rounded-md text-xs transition-all group {activeTerminalId === terminal.id ? 'bg-sky-500/10 text-sky-400 ring-1 ring-sky-500/30' : 'text-slate-400 hover:bg-white/5 hover:text-slate-200'}"
@@ -1494,7 +1496,7 @@
                                     {:else}
                                       {#each terminal.savedCommands as cmd, cmdIdx (`${terminal.id}:${cmd.id}`)}
                                         <div
-                                          class="tree-row relative flex items-center gap-1 px-1 py-0.5 rounded hover:bg-white/5 group/cmd text-[10px] transition-all {isDraggingRow({ type: 'command', id: cmd.id, terminalId: terminal.id }) ? 'opacity-50' : ''} {activeZoneFor('command', cmd.id) === 'into' ? 'bg-emerald-500/10 ring-1 ring-emerald-500/30' : ''}"
+                                          class="tree-row relative flex items-center gap-1 px-1 py-0.5 rounded hover:bg-white/5 group/cmd text-[10px]"
                                           data-dnd-row
                                           data-dnd-type="command"
                                           data-dnd-id={cmd.id}
@@ -1504,8 +1506,6 @@
                                           data-dnd-terminal={terminal.id}
                                           onpointerdown={(e) => onPointerDown(e, { type: 'command', id: cmd.id, index: cmdIdx, connId, projectId: project.id, terminalId: terminal.id })}
                                         >
-                                          {#if activeZoneFor('command', cmd.id) === 'before'}<div class="absolute top-0 left-0 right-0 h-0.5 bg-emerald-500 z-10 pointer-events-none"></div>{/if}
-                                          {#if activeZoneFor('command', cmd.id) === 'after'}<div class="absolute bottom-0 left-0 right-0 h-0.5 bg-emerald-500 z-10 pointer-events-none"></div>{/if}
                                           {#if showCommandActionIcons}
                                             <!-- On-connect toggle -->
                                             <button
@@ -1606,7 +1606,7 @@
                   {#if conn.projectGroups}
                     {#each conn.projectGroups as group, groupIdx (group.id)}
                       <div
-                        class="relative mb-1 transition-all {isDraggingRow({ type: 'project-group', id: group.id }) ? 'opacity-50' : ''} {activeZoneFor('project-group', group.id) === 'into' ? 'bg-violet-500/10 rounded-md ring-1 ring-violet-500/30' : ''}"
+                        class="relative mb-1"
                         data-dnd-row
                         data-dnd-type="project-group"
                         data-dnd-id={group.id}
@@ -1615,8 +1615,6 @@
                         data-dnd-group={group.id}
                         onpointerdown={(e) => onPointerDown(e, { type: 'project-group', id: group.id, index: groupIdx, connId: conn.id, groupId: group.id })}
                       >
-                        {#if activeZoneFor('project-group', group.id) === 'before'}<div class="absolute top-0 left-0 right-0 h-0.5 bg-violet-500 z-10 pointer-events-none"></div>{/if}
-                        {#if activeZoneFor('project-group', group.id) === 'after'}<div class="absolute bottom-0 left-0 right-0 h-0.5 bg-violet-500 z-10 pointer-events-none"></div>{/if}
                         <button data-dnd-bar class="tree-row relative w-full flex items-center px-2 py-1.5 rounded-md text-xs transition-colors hover:bg-white/5 group/pg" onpointerdown={onRowPointerDown} onclick={(e) => onRowClick(e, () => toggleProjectGroupCollapse(conn.id, group.id))}>
                           <div class="tree-row-label gap-2">
                             <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0 text-violet-400 transition-transform {group.collapsed ? '-rotate-90' : ''}" data-tooltip={group.collapsed ? 'Expand project group' : 'Collapse project group'} data-tooltip-pos="bottom-right"><polyline points="6 9 12 15 18 9"/></svg>
@@ -1672,15 +1670,13 @@
           <div class="text-[10px] font-bold uppercase tracking-widest text-slate-500 mb-3 px-2">Groups</div>
           {#each terminalGroups as group, groupIdx (group.id)}
             <div
-              class="relative mb-2 transition-all {isDraggingRow({ type: 'group', id: group.id }) ? 'opacity-50' : ''}"
+              class="relative mb-2"
               data-dnd-row
               data-dnd-type="group"
               data-dnd-id={group.id}
               data-dnd-index={groupIdx}
               onpointerdown={(e) => onPointerDown(e, { type: 'group', id: group.id, index: groupIdx })}
             >
-              {#if activeZoneFor('group', group.id) === 'before'}<div class="absolute top-0 left-0 right-0 h-0.5 bg-indigo-500 z-10 pointer-events-none"></div>{/if}
-              {#if activeZoneFor('group', group.id) === 'after'}<div class="absolute bottom-0 left-0 right-0 h-0.5 bg-indigo-500 z-10 pointer-events-none"></div>{/if}
               <button data-dnd-bar class="tree-row relative w-full flex items-center px-2 py-1.5 rounded-lg text-xs font-semibold transition-colors hover:bg-white/5 group" onpointerdown={onRowPointerDown} onclick={(e) => onRowClick(e, () => toggleGroupCollapse(group.id))}>
                 <div class="tree-row-label gap-2">
                   <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0 text-indigo-400 transition-transform {group.collapsed ? '-rotate-90' : ''}" data-tooltip={group.collapsed ? 'Expand group' : 'Collapse group'} data-tooltip-pos="bottom-right"><polyline points="6 9 12 15 18 9"/></svg>
@@ -1718,7 +1714,7 @@
                       {#if terminal}
                         <!-- Group Terminal row -->
                         <div
-                          class="relative mb-0.5 transition-all {isDraggingRow({ type: 'group-terminal', id: terminal.id, groupId: group.id }) ? 'opacity-50' : ''}"
+                          class="relative mb-0.5"
                           data-dnd-row
                           data-dnd-type="group-terminal"
                           data-dnd-id={terminal.id}
@@ -1727,8 +1723,6 @@
                           data-dnd-group={group.id}
                           onpointerdown={(e) => onPointerDown(e, { type: 'group-terminal', id: terminal.id, index: termIdx, terminalId: terminal.id, groupId: group.id })}
                         >
-                          {#if activeZoneFor('group-terminal', terminal.id) === 'before'}<div class="absolute top-0 left-0 right-0 h-0.5 bg-indigo-400 z-10 pointer-events-none"></div>{/if}
-                          {#if activeZoneFor('group-terminal', terminal.id) === 'after'}<div class="absolute bottom-0 left-0 right-0 h-0.5 bg-indigo-400 z-10 pointer-events-none"></div>{/if}
                           <button
                             data-dnd-bar
                             class="tree-row relative w-full flex items-center px-2 py-1 rounded-md text-xs transition-all group {activeTerminalId === terminal.id ? 'bg-sky-500/10 text-sky-400 ring-1 ring-sky-500/30' : 'text-slate-400 hover:bg-white/5 hover:text-slate-200'}"
@@ -1818,7 +1812,7 @@
       class:grid-mode={!!gridViewProjectId}
       class:overflow-hidden={!gridViewProjectId || !currentGridConfig.rows}
       class:overflow-y-auto={!!gridViewProjectId && !!currentGridConfig.rows}
-      class:pointer-events-none={isResizingSidebar || !!dragState}
+      class:pointer-events-none={isResizingSidebar}
       id="workspace"
       style={gridViewProjectId ? [
         currentGridConfig.columns ? `grid-template-columns: repeat(${currentGridConfig.columns}, 1fr);` : '',
@@ -2053,6 +2047,63 @@
     overflow: hidden;
   }
 
+
+  /* Drop indicators painted via classList during drag (no Svelte re-render). */
+  :global(.dnd-dragging) {
+    opacity: 0.45;
+  }
+  :global([data-dnd-row].dnd-zone-before::before),
+  :global([data-dnd-row].dnd-zone-after::after) {
+    content: '';
+    position: absolute;
+    left: 0;
+    right: 0;
+    height: 2px;
+    z-index: 10;
+    pointer-events: none;
+    background: rgb(56 189 248);
+  }
+  :global([data-dnd-row].dnd-zone-before::before) {
+    top: 0;
+  }
+  :global([data-dnd-row].dnd-zone-after::after) {
+    bottom: 0;
+  }
+  :global([data-dnd-row][data-dnd-type='project'].dnd-zone-before::before),
+  :global([data-dnd-row][data-dnd-type='project'].dnd-zone-after::after) {
+    background: rgb(245 158 11);
+  }
+  :global([data-dnd-row][data-dnd-type='command'].dnd-zone-before::before),
+  :global([data-dnd-row][data-dnd-type='command'].dnd-zone-after::after) {
+    background: rgb(16 185 129);
+  }
+  :global([data-dnd-row][data-dnd-type='project-group'].dnd-zone-before::before),
+  :global([data-dnd-row][data-dnd-type='project-group'].dnd-zone-after::after) {
+    background: rgb(139 92 246);
+  }
+  :global([data-dnd-row][data-dnd-type='group'].dnd-zone-before::before),
+  :global([data-dnd-row][data-dnd-type='group'].dnd-zone-after::after),
+  :global([data-dnd-row][data-dnd-type='group-terminal'].dnd-zone-before::before),
+  :global([data-dnd-row][data-dnd-type='group-terminal'].dnd-zone-after::after) {
+    background: rgb(129 140 248);
+  }
+  :global([data-dnd-row].dnd-zone-into) {
+    background: rgb(16 185 129 / 0.1);
+    border-radius: 0.375rem;
+    box-shadow: inset 0 0 0 1px rgb(16 185 129 / 0.3);
+  }
+  :global([data-dnd-row][data-dnd-type='connection'].dnd-zone-into),
+  :global([data-dnd-row][data-dnd-type='project'].dnd-zone-into) {
+    background: rgb(14 165 233 / 0.1);
+    box-shadow: inset 0 0 0 1px rgb(14 165 233 / 0.3);
+  }
+  :global([data-dnd-row][data-dnd-type='project-group'].dnd-zone-into) {
+    background: rgb(139 92 246 / 0.1);
+    box-shadow: inset 0 0 0 1px rgb(139 92 246 / 0.3);
+  }
+  :global(body.tree-dnd-active) {
+    cursor: grabbing;
+  }
 
   /* Tree rows: labels own the full row width. Actions use display:none until
      hover so they never reserve a blank strip next to the separator. */
