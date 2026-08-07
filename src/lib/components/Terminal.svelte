@@ -95,9 +95,29 @@
     return text.length > 0 ? text : null;
   }
 
+  /**
+   * Cols/rows from host size using full width/height.
+   * Do NOT use FitAddon.fit() alone: it does
+   *   overviewRuler?.width || 14
+   * so overviewRuler.width: 0 still reserves 14px (0 is falsy) — the visible
+   * right-hand gutter in every pane.
+   */
+  function proposeTightDimensions(): { cols: number; rows: number } | null {
+    if (!term?.element || !terminalContainer) return null;
+    const cell = term._core?._renderService?.dimensions?.css?.cell;
+    if (!cell?.width || !cell?.height) return null;
+    const width = terminalContainer.clientWidth;
+    const height = terminalContainer.clientHeight;
+    if (width <= 0 || height <= 0) return null;
+    return {
+      cols: Math.max(2, Math.floor(width / cell.width)),
+      rows: Math.max(1, Math.floor(height / cell.height)),
+    };
+  }
+
   /** Fit the terminal, only send resize if dimensions actually changed */
   function safeFit(force = false) {
-    if (!term || !fitAddon || !terminalContainer || terminalContainer.offsetParent === null) return;
+    if (!term || !terminalContainer || terminalContainer.offsetParent === null) return;
     // Skip if terminal slot is hidden (visibility: hidden)
     const slot = terminalContainer.closest('.terminal-slot');
     if (slot?.classList.contains('terminal-hidden')) return;
@@ -107,7 +127,27 @@
     if (!force && clientWidth === lastContainerWidth && clientHeight === lastContainerHeight) return;
     lastContainerWidth = clientWidth;
     lastContainerHeight = clientHeight;
-    fitAddon.fit();
+
+    // Warm cell metrics once if needed (FitAddon reads them into the core).
+    let dims = proposeTightDimensions();
+    if (!dims && fitAddon) {
+      try {
+        fitAddon.fit();
+      } catch {
+        /* ignore */
+      }
+      dims = proposeTightDimensions();
+    }
+    if (!dims) return;
+
+    if (term.cols !== dims.cols || term.rows !== dims.rows) {
+      term.resize(dims.cols, dims.rows);
+    }
+    // Stretch element to host so any sub-cell remainder is not a dark strip.
+    if (term.element) {
+      term.element.style.width = '100%';
+      term.element.style.height = '100%';
+    }
     if (term.cols !== lastCols || term.rows !== lastRows) {
       lastCols = term.cols;
       lastRows = term.rows;
@@ -124,10 +164,6 @@
       cursorBlink: true,
       fontSize: fontSize,
       lineHeight: 1.2,
-      // FitAddon reserves overviewRuler.width (default 14px) on the right for a
-      // scrollbar gutter — that left a visible empty strip in each grid tile.
-      // Zero it and overlay the scrollbar so cols use the full host width.
-      overviewRuler: { width: 0 },
       theme: {
         background: '#0f172a', // Slate 900
         foreground: '#f1f5f9', // Slate 100
@@ -457,7 +493,7 @@
     scrollbar-width: none;
   }
 
-  /* Flush xterm into the host — no internal gutter from the library defaults. */
+  /* Flush xterm into the host — full width (no FitAddon 14px gutter). */
   .terminal-xterm-host :global(.xterm) {
     height: 100% !important;
     width: 100% !important;
@@ -465,10 +501,18 @@
     margin: 0 !important;
   }
   .terminal-xterm-host :global(.xterm-viewport) {
-    /* Overlay scrollbar so it does not reserve a permanent right gutter. */
+    width: 100% !important;
+    /* Overlay-style scrollbar; do not reserve layout gutter. */
     overflow-y: auto;
     scrollbar-width: thin;
     scrollbar-gutter: auto;
+  }
+  .terminal-xterm-host :global(.xterm-viewport::-webkit-scrollbar) {
+    width: 8px;
+  }
+  .terminal-xterm-host :global(.xterm-viewport::-webkit-scrollbar-thumb) {
+    background: rgba(148, 163, 184, 0.35);
+    border-radius: 4px;
   }
   .terminal-xterm-host :global(.xterm-screen) {
     margin: 0 !important;
