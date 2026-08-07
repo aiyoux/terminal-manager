@@ -1,8 +1,12 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
+  import { page } from '$app/state';
   import Terminal from '$lib/components/Terminal.svelte';
   import VariablesEditor from '$lib/components/VariablesEditor.svelte';
   import TextReplaceModal from '$lib/components/TextReplaceModal.svelte';
   import { closeConnection, sendInput, isConnected, reconnectConnection, connectionStatuses } from '$lib/connectionManager.svelte';
+
+  let { children } = $props();
   import {
     getConnections,
     getTerminalGroups,
@@ -88,7 +92,15 @@
   let activeTerminalId = $derived(getActiveTerminalId());
   let activeWsUrl = $derived(getWsUrlForTerminal(activeTerminalId));
 
-  let activeSidebarTab = $state<'connections' | 'groups' | 'pinned'>('connections');
+  type SidebarTab = 'connections' | 'groups' | 'pinned';
+
+  /** Driven by the URL so refresh keeps the active sidebar tab. */
+  let activeSidebarTab = $derived.by((): SidebarTab => {
+    const path = page.url.pathname;
+    if (path === '/groups' || path.startsWith('/groups/')) return 'groups';
+    if (path === '/pinned' || path.startsWith('/pinned/')) return 'pinned';
+    return 'connections';
+  });
 
   // --- Sidebar view settings ---
   const VIEW_SETTINGS_KEY = 'terminal-dashboard-view-settings';
@@ -642,15 +654,66 @@
     window.addEventListener('mouseup', onMouseUp, { once: true });
   }
 
-  // Grid view state
+  // Grid view state (live workspace for the *current* sidebar tab)
   let gridViewConnId = $state<string>('');
   let gridViewProjectId = $state<string>('');
 
   // Global grid layout config
   let currentGridConfig = $derived(getGridSettings());
 
-  // Track which terminals are mounted
+  // Once mounted, terminals stay mounted across tab switches (only hidden via CSS).
   let mountedTerminalIds = $state<Set<string>>(new Set());
+
+  /** Per-tab workspace snapshot so Connections / Groups / Pinned each restore
+   *  their own selection + grid mode when you come back. */
+  type TabWorkspace = {
+    activeTerminalId: string;
+    gridViewConnId: string;
+    gridViewProjectId: string;
+  };
+  let tabWorkspace: Record<SidebarTab, TabWorkspace> = {
+    connections: { activeTerminalId: '', gridViewConnId: '', gridViewProjectId: '' },
+    groups: { activeTerminalId: '', gridViewConnId: '', gridViewProjectId: '' },
+    pinned: { activeTerminalId: '', gridViewConnId: '__pinned__', gridViewProjectId: '__pinned__' },
+  };
+  let prevSidebarTab: SidebarTab | null = null;
+
+  function ensureMounted(ids: Iterable<string>) {
+    let changed = false;
+    for (const id of ids) {
+      if (!mountedTerminalIds.has(id)) {
+        mountedTerminalIds.add(id);
+        changed = true;
+      }
+    }
+    if (changed) mountedTerminalIds = new Set(mountedTerminalIds);
+  }
+
+  function applyTabWorkspace(tab: SidebarTab, ws: TabWorkspace) {
+    gridViewConnId = ws.gridViewConnId;
+    gridViewProjectId = ws.gridViewProjectId;
+    setActiveTerminalId(ws.activeTerminalId);
+
+    if (tab === 'pinned') {
+      // Pinned tab defaults to the pinned multi-terminal grid.
+      if (!gridViewProjectId) {
+        gridViewConnId = '__pinned__';
+        gridViewProjectId = '__pinned__';
+      }
+      ensureMounted(pinnedTerminals.map((t) => t.id));
+      return;
+    }
+
+    // Restore any terminals that belong to the saved single/grid view.
+    if (ws.activeTerminalId) ensureMounted([ws.activeTerminalId]);
+    if (ws.gridViewProjectId && ws.gridViewConnId === 'group') {
+      const group = terminalGroups.find((g) => g.id === ws.gridViewProjectId);
+      if (group) ensureMounted(group.terminalIds);
+    } else if (ws.gridViewProjectId && ws.gridViewConnId && ws.gridViewConnId !== '__pinned__') {
+      const found = findProjectById(ws.gridViewProjectId);
+      if (found) ensureMounted(found.project.terminals.map((t) => t.id));
+    }
+  }
 
   // Flat list of all terminals with connection info
   let allTerminals = $derived.by(() => {
@@ -699,7 +762,30 @@
   });
   let pinnedTerminals = $derived(allTerminals.filter(t => t.pinned));
 
-  // Auto-mount terminal when it becomes active
+  // Save/restore workspace when the sidebar route changes. untrack so grid /
+  // active-terminal writes don't re-enter the effect.
+  $effect(() => {
+    const tab = activeSidebarTab;
+    untrack(() => {
+      if (prevSidebarTab === tab) return;
+
+      if (prevSidebarTab !== null) {
+        tabWorkspace[prevSidebarTab] = {
+          activeTerminalId,
+          gridViewConnId,
+          gridViewProjectId,
+        };
+      }
+
+      applyTabWorkspace(tab, tabWorkspace[tab]);
+      if (tab === 'pinned') {
+        ensureMounted(pinnedTerminals.map((t) => t.id));
+      }
+      prevSidebarTab = tab;
+    });
+  });
+
+  // Auto-mount terminal when it becomes active (never unmount on tab switch)
   $effect(() => {
     if (activeTerminalId && !mountedTerminalIds.has(activeTerminalId)) {
       mountedTerminalIds.add(activeTerminalId);
@@ -707,17 +793,10 @@
     }
   });
 
-  // Auto-mount pinned terminals when in pinned view
+  // Keep pinned terminals mounted while the pinned grid is showing
   $effect(() => {
     if (gridViewConnId === '__pinned__') {
-      let changed = false;
-      for (const t of pinnedTerminals) {
-        if (!mountedTerminalIds.has(t.id)) {
-          mountedTerminalIds.add(t.id);
-          changed = true;
-        }
-      }
-      if (changed) mountedTerminalIds = new Set(mountedTerminalIds);
+      ensureMounted(pinnedTerminals.map((t) => t.id));
     }
   });
 
@@ -1251,37 +1330,33 @@
         : `width: ${sidebarOpen ? sidebarWidth + 'px' : '0px'}; opacity: ${sidebarOpen ? 1 : 0}`}
     >
       <div class="flex items-center border-b border-white/5 p-2 gap-1">
-        <button
-          class="flex-1 py-1.5 text-xs font-semibold rounded-md transition-colors {activeSidebarTab === 'connections' ? 'bg-white/10 text-white' : 'text-slate-500 hover:text-slate-300 hover:bg-white/5'}"
-          onclick={() => { activeSidebarTab = 'connections'; if (gridViewConnId === '__pinned__') { gridViewConnId = ''; gridViewProjectId = ''; } }}
+        <a
+          href="/connections"
+          class="flex-1 py-1.5 text-center text-xs font-semibold rounded-md transition-colors {activeSidebarTab === 'connections' ? 'bg-white/10 text-white' : 'text-slate-500 hover:text-slate-300 hover:bg-white/5'}"
           data-tooltip="View server connections and project workspaces"
           data-tooltip-pos="bottom"
+          aria-current={activeSidebarTab === 'connections' ? 'page' : undefined}
         >
           Connections
-        </button>
-        <button
-          class="flex-1 py-1.5 text-xs font-semibold rounded-md transition-colors {activeSidebarTab === 'groups' ? 'bg-white/10 text-white' : 'text-slate-500 hover:text-slate-300 hover:bg-white/5'}"
-          onclick={() => { activeSidebarTab = 'groups'; if (gridViewConnId === '__pinned__') { gridViewConnId = ''; gridViewProjectId = ''; } }}
+        </a>
+        <a
+          href="/groups"
+          class="flex-1 py-1.5 text-center text-xs font-semibold rounded-md transition-colors {activeSidebarTab === 'groups' ? 'bg-white/10 text-white' : 'text-slate-500 hover:text-slate-300 hover:bg-white/5'}"
           data-tooltip="View custom multi-terminal layout groups"
           data-tooltip-pos="bottom"
+          aria-current={activeSidebarTab === 'groups' ? 'page' : undefined}
         >
           Groups
-        </button>
-        <button
-          class="flex-1 py-1.5 text-xs font-semibold rounded-md transition-colors {activeSidebarTab === 'pinned' ? 'bg-white/10 text-white' : 'text-slate-500 hover:text-slate-300 hover:bg-white/5'}"
-          onclick={() => {
-            activeSidebarTab = 'pinned';
-            gridViewProjectId = '__pinned__';
-            gridViewConnId = '__pinned__';
-            setActiveTerminalId('');
-            for (const t of pinnedTerminals) mountedTerminalIds.add(t.id);
-            mountedTerminalIds = new Set(mountedTerminalIds);
-          }}
+        </a>
+        <a
+          href="/pinned"
+          class="flex-1 py-1.5 text-center text-xs font-semibold rounded-md transition-colors {activeSidebarTab === 'pinned' ? 'bg-white/10 text-white' : 'text-slate-500 hover:text-slate-300 hover:bg-white/5'}"
           data-tooltip="View pinned active terminals"
           data-tooltip-pos="bottom"
+          aria-current={activeSidebarTab === 'pinned' ? 'page' : undefined}
         >
           Pinned
-        </button>
+        </a>
       </div>
 
       <!-- View settings (below tabs, above section labels) -->
@@ -1431,7 +1506,7 @@
                                   <div class={`w-1.5 h-1.5 rounded-full shrink-0 ${!isMounted ? 'bg-slate-600' : (isConn ? 'bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.5)]' : 'bg-rose-500 shadow-[0_0_6px_rgba(244,63,94,0.5)]')}`} data-tooltip={!isMounted ? 'Not initialized' : (isConn ? 'Connected' : 'Disconnected')} data-tooltip-pos="bottom-right"></div>
                                   <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0" data-tooltip="Terminal session" data-tooltip-pos="bottom-right"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
                                   <span
-                                    class="truncate select-none cursor-pointer"
+                                    class="tree-row-name truncate select-none cursor-pointer text-left"
                                     title="Click the arrow to expand/collapse commands"
                                     data-tooltip={onConnectErrorTooltip(terminal.id)}
                                     data-tooltip-pos="bottom-right"
@@ -1731,7 +1806,7 @@
                             <div class="tree-row-label gap-1.5">
                               <div class={`w-1.5 h-1.5 rounded-full shrink-0 ${!isMounted ? 'bg-slate-600' : (isConn ? 'bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.5)]' : 'bg-rose-500 shadow-[0_0_6px_rgba(244,63,94,0.5)]')}`} data-tooltip={!isMounted ? 'Not initialized' : (isConn ? 'Connected' : 'Disconnected')} data-tooltip-pos="bottom-right"></div>
                               <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0" data-tooltip="Terminal session" data-tooltip-pos="bottom-right"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
-                              <span class="tree-row-name truncate">{terminal.name}</span>
+                              <span class="tree-row-name truncate text-left">{terminal.name}</span>
                             </div>
                             <div class="tree-row-actions tree-row-actions-tight" data-no-drag>
                               <div role="button" tabindex="0" data-tooltip="Remove terminal from group" data-tooltip-pos="bottom-left" onclick={(e) => handleRemoveTerminalFromGroup(group.id, terminal.id, e)} onkeydown={(e) => e.key === 'Enter' && handleRemoveTerminalFromGroup(group.id, terminal.id, e)} class="p-0.5 text-slate-500 hover:text-rose-400 rounded hover:bg-rose-500/20 transition-colors">
@@ -1764,7 +1839,7 @@
                     <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0 text-amber-400" data-tooltip="Pinned terminal" data-tooltip-pos="bottom-right"><path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"/></svg>
                     <div class={`w-1.5 h-1.5 rounded-full shrink-0 ${!isMounted ? 'bg-slate-600' : (isConn ? 'bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.5)]' : 'bg-rose-500 shadow-[0_0_6px_rgba(244,63,94,0.5)]')}`} data-tooltip={!isMounted ? 'Not initialized' : (isConn ? 'Connected' : 'Disconnected')} data-tooltip-pos="bottom-right"></div>
                     <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0" data-tooltip="Terminal session" data-tooltip-pos="bottom-right"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
-                    <span class="tree-row-name truncate">{terminal.name}</span>
+                    <span class="tree-row-name truncate text-left">{terminal.name}</span>
                   </div>
                   <div class="tree-row-actions tree-row-actions-tight" data-no-drag>
                     <div role="button" tabindex="0" data-tooltip="Unpin terminal" data-tooltip-pos="bottom-left" onclick={(e) => { e.stopPropagation(); toggleTerminalPinned(terminal.connId, terminal.projectId, terminal.id); }} onkeydown={(e) => e.key === 'Enter' && toggleTerminalPinned(terminal.connId, terminal.projectId, terminal.id)} class="p-0.5 text-amber-400 hover:text-amber-300 rounded hover:bg-amber-500/20 transition-colors">
@@ -1808,7 +1883,7 @@
     <!-- Terminal Workspace -->
     <div
       bind:this={workspaceEl}
-      class="flex-1 min-w-0 bg-slate-900/30 p-3 relative"
+      class="flex-1 min-w-0 relative {gridViewProjectId ? 'bg-slate-950 p-0' : 'bg-slate-900/30 p-3'}"
       class:grid-mode={!!gridViewProjectId}
       class:overflow-hidden={!gridViewProjectId || !currentGridConfig.rows}
       class:overflow-y-auto={!!gridViewProjectId && !!currentGridConfig.rows}
@@ -1816,7 +1891,8 @@
       id="workspace"
       style={gridViewProjectId ? [
         currentGridConfig.columns ? `grid-template-columns: repeat(${currentGridConfig.columns}, 1fr);` : '',
-        currentGridConfig.rows ? `--grid-row-height: calc((100vh - 3.5rem - 1.5rem - ${(currentGridConfig.rows - 1) * 0.75}rem) / ${currentGridConfig.rows}); grid-template-rows: repeat(${currentGridConfig.rows}, var(--grid-row-height)); grid-auto-rows: var(--grid-row-height);` : '',
+        // Header is 3.5rem; no workspace padding or inter-cell gaps in dense grid.
+        currentGridConfig.rows ? `--grid-row-height: calc((100vh - 3.5rem) / ${currentGridConfig.rows}); grid-template-rows: repeat(${currentGridConfig.rows}, var(--grid-row-height)); grid-auto-rows: var(--grid-row-height);` : '',
       ].filter(Boolean).join(' ') : ''}
     >
       {#each allTerminals as t (t.id)}
@@ -1846,6 +1922,7 @@
                 projectId={t.projectId}
                 savedCommands={t.savedCommands}
                 pinned={t.pinned}
+                dense={!!gridViewProjectId && isVisible}
                 onAddToGroup={() => handleAddToGroupPrompt(t.id)}
                 onTogglePin={() => toggleTerminalPinned(t.connId, t.projectId, t.id)}
                 onResolveError={(msg) => { void showAlert(msg); }}
@@ -2010,6 +2087,10 @@
       onClose={() => { textReplaceRef = null; }}
     />
   {/if}
+
+  <!-- Child tab routes are intentionally empty; this layout owns the UI so
+       terminals stay mounted when switching Connections / Groups / Pinned. -->
+  <div class="hidden" aria-hidden="true">{@render children()}</div>
 </div>
 
 <style>
@@ -2031,11 +2112,16 @@
     inset: 0.75rem;
   }
 
+  /* Dense grid: zero gap/padding; cells share single borders (top/left on
+     workspace, right/bottom on each terminal chrome). */
   :global(#workspace.grid-mode) {
     display: grid !important;
     grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
     grid-auto-rows: minmax(0, 1fr);
-    gap: 0.75rem;
+    gap: 0;
+    padding: 0 !important;
+    border-top: 1px solid rgb(51 65 85);
+    border-left: 1px solid rgb(51 65 85);
   }
 
   :global(.terminal-visible.terminal-grid) {
@@ -2110,14 +2196,18 @@
   :global(.tree-row) {
     position: relative;
     min-width: 0;
+    /* <button> defaults to text-align: center — keep tree labels left-aligned. */
+    text-align: left;
   }
   :global(.tree-row-label) {
     display: flex;
     align-items: center;
+    justify-content: flex-start;
     flex: 1 1 0%;
     min-width: 0;
     max-width: 100%;
     overflow: hidden;
+    text-align: left;
   }
   :global(.tree-row-name) {
     flex: 1 1 0%;
@@ -2125,6 +2215,7 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    text-align: left;
   }
   :global(.tree-row-actions) {
     position: absolute;
