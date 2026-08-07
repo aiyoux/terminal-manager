@@ -7,6 +7,10 @@ test.describe('Variables UI', () => {
 	test.beforeEach(async ({ page }) => {
 		await page.goto('/');
 		await expect(page.locator('body')).toBeVisible();
+		await page.evaluate(async () => {
+			const stores = await import('/src/lib/stores.svelte.ts');
+			await stores.whenLoaded();
+		});
 	});
 
 	test('U1-U2 variables editor add/edit/delete on project', async ({ page }) => {

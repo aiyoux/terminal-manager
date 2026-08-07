@@ -75,6 +75,7 @@
   let term: any;
   let fitAddon: any;
   let resizeObserver: ResizeObserver;
+  let visibilityObserver: MutationObserver | null = null;
   let unsubscribe: (() => void) | null = null;
 
   let connected = $derived(!!connectionStatuses[terminalId]);
@@ -83,6 +84,10 @@
   let lastRows = 0;
   let lastContainerWidth = 0;
   let lastContainerHeight = 0;
+  /** Coalesce bursty layout/font/visibility fit requests. */
+  let fitRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  let fitRetryAttempts = 0;
+  const FIT_RETRY_MAX = 12;
 
   // DA response patterns — only filter during buffer replay, not live data
   const DA_FULL = /\x1b\[[\?>]?[\d;]*c/g;
@@ -115,20 +120,36 @@
     };
   }
 
-  /** Fit the terminal, only send resize if dimensions actually changed */
+  function scheduleFitRetry(reason: 'metrics' | 'layout' = 'layout') {
+    if (fitRetryAttempts >= FIT_RETRY_MAX) {
+      fitRetryAttempts = 0;
+      return;
+    }
+    if (fitRetryTimer != null) return;
+    fitRetryAttempts += 1;
+    // Layout races: short backoff. Font/cell metrics: slightly longer.
+    const delay = reason === 'metrics' ? 50 + fitRetryAttempts * 25 : 16 + fitRetryAttempts * 16;
+    fitRetryTimer = setTimeout(() => {
+      fitRetryTimer = null;
+      safeFit(true);
+    }, delay);
+  }
+
+  /** Fit the terminal to its host. Force after fonts, visibility, or failed metrics. */
   function safeFit(force = false) {
-    if (!term || !terminalContainer || terminalContainer.offsetParent === null) return;
-    // Skip if terminal slot is hidden (visibility: hidden)
+    if (!term || !terminalContainer) return;
+    // offsetParent is null for position:fixed ancestors edge cases; still try
+    // visibility:hidden slots — they keep layout size but we skip until shown.
     const slot = terminalContainer.closest('.terminal-slot');
     if (slot?.classList.contains('terminal-hidden')) return;
-    const { clientWidth, clientHeight } = terminalContainer;
-    if (clientWidth === 0 || clientHeight === 0) return;
-    // Skip if container pixel size hasn't changed (avoids unnecessary fit/resize cycles)
-    if (!force && clientWidth === lastContainerWidth && clientHeight === lastContainerHeight) return;
-    lastContainerWidth = clientWidth;
-    lastContainerHeight = clientHeight;
 
-    // Warm cell metrics once if needed (FitAddon reads them into the core).
+    const { clientWidth, clientHeight } = terminalContainer;
+    if (clientWidth === 0 || clientHeight === 0) {
+      scheduleFitRetry('layout');
+      return;
+    }
+
+    // Warm cell metrics if needed (FitAddon populates render service dims).
     let dims = proposeTightDimensions();
     if (!dims && fitAddon) {
       try {
@@ -138,7 +159,23 @@
       }
       dims = proposeTightDimensions();
     }
-    if (!dims) return;
+    if (!dims) {
+      scheduleFitRetry('metrics');
+      return;
+    }
+
+    const sizeUnchanged =
+      clientWidth === lastContainerWidth && clientHeight === lastContainerHeight;
+    const dimsUnchanged = dims.cols === term.cols && dims.rows === term.rows;
+    // Important: do NOT skip solely on container size. Font load can change
+    // cell metrics without a container resize — that was a stuck half-size bug.
+    if (!force && sizeUnchanged && dimsUnchanged) {
+      fitRetryAttempts = 0;
+      return;
+    }
+
+    lastContainerWidth = clientWidth;
+    lastContainerHeight = clientHeight;
 
     if (term.cols !== dims.cols || term.rows !== dims.rows) {
       term.resize(dims.cols, dims.rows);
@@ -153,6 +190,7 @@
       lastRows = term.rows;
       sendResize(terminalId, term.cols, term.rows);
     }
+    fitRetryAttempts = 0;
   }
 
   async function initTerminal() {
@@ -195,9 +233,17 @@
     term.loadAddon(new WebLinksAddon());
 
     term.open(terminalContainer);
-    
-    // Fit initially
-    setTimeout(safeFit, 50);
+
+    // Multi-pass initial fit: first paint, next frame, after fonts.
+    requestAnimationFrame(() => {
+      safeFit(true);
+      requestAnimationFrame(() => safeFit(true));
+    });
+    setTimeout(() => safeFit(true), 50);
+    setTimeout(() => safeFit(true), 200);
+    if (typeof document !== 'undefined' && document.fonts?.ready) {
+      document.fonts.ready.then(() => safeFit(true)).catch(() => {});
+    }
 
     term.onData((data: string) => {
       sendInput(terminalId, data);
@@ -228,9 +274,25 @@
     let resizeTimeout: ReturnType<typeof setTimeout>;
     resizeObserver = new ResizeObserver(() => {
       clearTimeout(resizeTimeout);
-      resizeTimeout = setTimeout(safeFit, 150);
+      resizeTimeout = setTimeout(() => safeFit(false), 50);
     });
     resizeObserver.observe(terminalContainer);
+    // Also observe the slot — grid/flex parent size changes may not always
+    // surface as a resize on the absolute-filled host alone.
+    const slot = terminalContainer.closest('.terminal-slot');
+    if (slot instanceof HTMLElement) {
+      resizeObserver.observe(slot);
+      // Hidden→visible keeps the same pixel size, so ResizeObserver may not
+      // fire. Watch class changes and force-fit when the slot is shown.
+      visibilityObserver = new MutationObserver(() => {
+        if (!slot.classList.contains('terminal-hidden')) {
+          lastContainerWidth = 0;
+          lastContainerHeight = 0;
+          requestAnimationFrame(() => safeFit(true));
+        }
+      });
+      visibilityObserver.observe(slot, { attributes: true, attributeFilter: ['class'] });
+    }
 
     window.addEventListener('pointerdown', handleWindowPointerDown, true);
     window.addEventListener('click', handleWindowClick, true);
@@ -241,6 +303,8 @@
     if (unsubscribe) unsubscribe();
     if (term) term.dispose();
     if (resizeObserver) resizeObserver.disconnect();
+    if (visibilityObserver) visibilityObserver.disconnect();
+    if (fitRetryTimer != null) clearTimeout(fitRetryTimer);
     window.removeEventListener('pointerdown', handleWindowPointerDown, true);
     window.removeEventListener('click', handleWindowClick, true);
     window.removeEventListener('keydown', handleWindowKeydown);

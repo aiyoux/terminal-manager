@@ -3,6 +3,10 @@ import { test, expect } from '@playwright/test';
 test.describe('Terminal Drag & Drop Across Folders', () => {
   test.beforeEach(async ({ page }) => {
     await page.goto('/');
+    await page.evaluate(async () => {
+      const stores = await import('/src/lib/stores.svelte.ts');
+      await stores.whenLoaded();
+    });
   });
 
   test('should move terminal from one project to another via moveTerminal store helper', async ({ page }) => {
