@@ -51,12 +51,18 @@ test.describe('tree-dnd helpers', () => {
         bottomHalf: pickZone(rect, 15, ['before', 'after']),
         intoOnly: pickZone(rect, 5, ['into']),
         none: pickZone(rect, 5, []),
+        // Expanded nested content under a row header must force "after" so open
+        // terminal command lists don't trap drops in the geometric top-half.
+        expandedBelow: pickZone(rect, 5, ['before', 'after'], { expandedBelow: true }),
+        expandedIntoOnly: pickZone(rect, 5, ['into'], { expandedBelow: true }),
       };
     });
     expect(result.topHalf).toBe('before');
     expect(result.bottomHalf).toBe('after');
     expect(result.intoOnly).toBe('into');
     expect(result.none).toBeNull();
+    expect(result.expandedBelow).toBe('after');
+    expect(result.expandedIntoOnly).toBe('into');
   });
 
   test('allowedZones: container into-drops, sibling reorders, and forbidden pairs', async ({ page }) => {

@@ -66,10 +66,27 @@ export const APPEND = Number.MAX_SAFE_INTEGER;
  * pair actually allows. This tree never has a case that allows all three
  * zones simultaneously — `before`/`after` are sibling-only and `into` is
  * container-only — so we only need the two branches below.
+ *
+ * Prefer passing the *row header* rect (the bar), not the full expanded
+ * wrapper. Expanded children (e.g. open terminal commands) make the wrapper
+ * very tall; using that height made the header always land in the "before"
+ * half, so you could not drop a terminal *after* another terminal that had
+ * its commands open.
+ *
+ * When `expandedBelow` is true (cursor is below the header, inside nested
+ * content of this row), force `after` for sibling reorders — the user is
+ * clearly aiming below this row's primary chrome.
  */
-export function pickZone(rect: DOMRect, clientY: number, allowed: Zone[]): Zone | null {
+export function pickZone(
+  rect: DOMRect,
+  clientY: number,
+  allowed: Zone[],
+  opts?: { expandedBelow?: boolean }
+): Zone | null {
   if (allowed.length === 0) return null;
   if (allowed.length === 1) return allowed[0];
+  // Nested content under an expanded row → treat as "after this sibling".
+  if (opts?.expandedBelow && allowed.includes('after')) return 'after';
   const y = clientY - rect.top;
   // Sibling reorder: top half = before, bottom half = after.
   return y < rect.height / 2 ? 'before' : 'after';

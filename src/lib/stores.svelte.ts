@@ -291,11 +291,14 @@ export function reorderProjects(connId: string, fromIndex: number, toIndex: numb
   }
 }
 
-export function reorderTerminals(connId: string, projectId: string, fromIndex: number, toIndex: number) {
-  const conn = connections.find(c => c.id === connId);
-  const project = conn?.projects.find(p => p.id === projectId);
-  if (project) {
-    moveItem(project.terminals, fromIndex, toIndex);
+export function reorderTerminals(_connId: string, projectId: string, fromIndex: number, toIndex: number) {
+  // Must use findProjectById — projects may live under projectGroups, not only
+  // conn.projects. Looking only at conn.projects made reorder a silent no-op
+  // for any terminal inside a grouped project (UI showed drop zones, mouse-up
+  // did nothing).
+  const found = findProjectById(projectId);
+  if (found) {
+    moveItem(found.project.terminals, fromIndex, toIndex);
     save();
   }
 }
@@ -321,10 +324,10 @@ export function moveTerminal(terminalId: string, targetProjectId: string, toInde
   save();
 }
 
-export function reorderSavedCommands(connId: string, projectId: string, terminalId: string, fromIndex: number, toIndex: number) {
-  const conn = connections.find(c => c.id === connId);
-  const project = conn?.projects.find(p => p.id === projectId);
-  const terminal = project?.terminals.find(t => t.id === terminalId);
+export function reorderSavedCommands(_connId: string, projectId: string, terminalId: string, fromIndex: number, toIndex: number) {
+  // Same as reorderTerminals: project may be inside a projectGroup.
+  const found = findProjectById(projectId);
+  const terminal = found?.project.terminals.find(t => t.id === terminalId);
   if (terminal) {
     moveItem(terminal.savedCommands, fromIndex, toIndex);
     save();
