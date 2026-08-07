@@ -177,8 +177,9 @@
   // True while shift is held during an active pointer drag — switches the
   // drop from move to copy.
   let dragCopy = $state(false);
-  // Cursor position during an active drag, for positioning the copy badge.
-  let dragCursorXY = $state<{ x: number; y: number } | null>(null);
+  // Copy-mode badge: positioned via direct DOM during drag so we don't write
+  // $state on every pointermove (that re-rendered the whole page + terminals).
+  let copyBadgeEl: HTMLElement | null = null;
 
   /** Active drop zone for a row, driven by the single shared dropState. Scoped
    *  by type too: a terminal can appear both in a project's terminal list and
@@ -406,6 +407,40 @@
     );
   }
 
+  /** Only write dropState when the target/zone actually changed — assigning a
+   *  fresh object every pointermove forced a full +page re-render (all xterms). */
+  function setDropState(next: DropState | null) {
+    const prev = dropState;
+    if (prev === next) return;
+    if (
+      prev &&
+      next &&
+      prev.targetType === next.targetType &&
+      prev.targetId === next.targetId &&
+      prev.targetIndex === next.targetIndex &&
+      prev.zone === next.zone &&
+      prev.connId === next.connId &&
+      prev.groupId === next.groupId &&
+      prev.projectId === next.projectId &&
+      prev.terminalId === next.terminalId
+    ) {
+      return;
+    }
+    dropState = next;
+  }
+
+  function positionCopyBadge(x: number, y: number, show: boolean) {
+    const el = copyBadgeEl;
+    if (!el) return;
+    if (!show) {
+      el.style.display = 'none';
+      return;
+    }
+    el.style.display = 'flex';
+    el.style.left = `${x + 12}px`;
+    el.style.top = `${y - 22}px`;
+  }
+
   function onPointerDown(e: PointerEvent, desc: RowDescriptor) {
     pointerDragCommitted = false; // fresh for this gesture
     if (e.button !== 0) return; // only primary button drags
@@ -413,6 +448,7 @@
     e.stopPropagation(); // prevent nested wrappers starting a second session
 
     let activated = false;
+    let liveCopy = false;
     const startX = e.clientX;
     const startY = e.clientY;
 
@@ -423,8 +459,14 @@
         pointerDragCommitted = true;
         dragState = { type: desc.type, id: desc.id, index: desc.index, connId: desc.connId, projectId: desc.projectId, terminalId: desc.terminalId, groupId: desc.groupId };
       }
-      dragCopy = ev.shiftKey;
-      dragCursorXY = { x: ev.clientX, y: ev.clientY };
+
+      // Only touch $state when shift-copy mode flips (rare). Cursor badge is DOM-only.
+      const nextCopy = ev.shiftKey;
+      if (nextCopy !== liveCopy) {
+        liveCopy = nextCopy;
+        dragCopy = nextCopy;
+      }
+      positionCopyBadge(ev.clientX, ev.clientY, liveCopy);
 
       // Walk up from the innermost data-dnd-row to find a row that accepts a
       // drop for the current drag type. Without this, dragging a terminal over
@@ -440,28 +482,28 @@
       let t = el && descriptorFromDataset(el);
       let walkedUp = false;
       if (t) {
-        let self = !dragCopy && isSelfDrop(desc, t);
+        let self = !liveCopy && isSelfDrop(desc, t);
         let allowed = self ? [] : allowedZones(dragState!, { targetType: t.type, connId: t.connId, groupId: t.groupId });
         while ((self || allowed.length === 0) && el) {
           el = parentDndRow(el);
           walkedUp = true;
           t = el && descriptorFromDataset(el);
           if (!t) break;
-          self = !dragCopy && isSelfDrop(desc, t);
+          self = !liveCopy && isSelfDrop(desc, t);
           allowed = self ? [] : allowedZones(dragState!, { targetType: t.type, connId: t.connId, groupId: t.groupId });
         }
       }
       if (!t || !el) {
-        dropState = null;
+        setDropState(null);
         return;
       }
-      if (!dragCopy && isSelfDrop(desc, t)) {
-        dropState = null;
+      if (!liveCopy && isSelfDrop(desc, t)) {
+        setDropState(null);
         return;
       }
       const allowed = allowedZones(dragState!, { targetType: t.type, connId: t.connId, groupId: t.groupId });
       if (allowed.length === 0) {
-        dropState = null;
+        setDropState(null);
         return;
       }
       // Synthetic append zone always means "drop at end".
@@ -476,10 +518,19 @@
         zone = pickZone(bar, ev.clientY, allowed, { expandedBelow });
       }
       if (!zone) {
-        dropState = null;
+        setDropState(null);
         return;
       }
-      dropState = { targetType: t.type, targetId: t.id, targetIndex: t.index, zone, connId: t.connId, groupId: t.groupId, projectId: t.projectId, terminalId: t.terminalId };
+      setDropState({
+        targetType: t.type,
+        targetId: t.id,
+        targetIndex: t.index,
+        zone,
+        connId: t.connId,
+        groupId: t.groupId,
+        projectId: t.projectId,
+        terminalId: t.terminalId,
+      });
     };
 
     const finish = () => {
@@ -489,7 +540,7 @@
       dragState = null;
       dropState = null;
       dragCopy = false;
-      dragCursorXY = null;
+      positionCopyBadge(0, 0, false);
     };
 
     stopPointerDrag?.();
@@ -540,20 +591,41 @@
   let sidebarOpen = $state(true);
   let sidebarWidth = $state(288); // 18rem = 288px default
   let isResizingSidebar = $state(false);
+  let sidebarEl: HTMLElement | null = null;
+  let workspaceEl: HTMLElement | null = null;
 
   function startSidebarResize(e: MouseEvent) {
     e.preventDefault();
     isResizingSidebar = true;
     const startX = e.clientX;
     const startWidth = sidebarWidth;
+    let latest = startWidth;
+    const el = sidebarEl;
+    const ws = workspaceEl;
+    // Direct DOM width updates during drag — avoid $state on every mousemove
+    // (that re-rendered the whole page + all terminals and felt very laggy).
+    // Freeze the workspace pixel size so xterm ResizeObservers don't fire on
+    // every pixel of the drag (they're expensive).
+    if (el) el.style.width = startWidth + 'px';
+    if (ws) {
+      const frozen = ws.getBoundingClientRect().width;
+      ws.style.flex = 'none';
+      ws.style.width = frozen + 'px';
+    }
 
-    function onMouseMove(e: MouseEvent) {
-      const newWidth = Math.max(200, Math.min(600, startWidth + (e.clientX - startX)));
-      sidebarWidth = newWidth;
+    function onMouseMove(ev: MouseEvent) {
+      latest = Math.max(200, Math.min(600, startWidth + (ev.clientX - startX)));
+      if (el) el.style.width = latest + 'px';
     }
 
     function onMouseUp() {
+      // Commit once — reactive style binding takes over on re-render.
+      sidebarWidth = latest;
       isResizingSidebar = false;
+      if (ws) {
+        ws.style.flex = '';
+        ws.style.width = '';
+      }
       window.removeEventListener('mousemove', onMouseMove);
       window.removeEventListener('mouseup', onMouseUp);
     }
@@ -1164,8 +1236,11 @@
   <main class="flex-1 min-h-0 flex overflow-hidden">
     <!-- Sidebar -->
     <aside
-      class="flex flex-col border-r border-white/5 bg-slate-950 shrink-0 transition-[width,opacity] duration-200 overflow-hidden"
-      style="width: {sidebarOpen ? sidebarWidth + 'px' : '0px'}; opacity: {sidebarOpen ? 1 : 0};"
+      bind:this={sidebarEl}
+      class="flex flex-col border-r border-white/5 bg-slate-950 shrink-0 overflow-hidden {isResizingSidebar ? '' : 'transition-[width,opacity] duration-200'}"
+      style={isResizingSidebar
+        ? `opacity: ${sidebarOpen ? 1 : 0}`
+        : `width: ${sidebarOpen ? sidebarWidth + 'px' : '0px'}; opacity: ${sidebarOpen ? 1 : 0}`}
     >
       <div class="flex items-center border-b border-white/5 p-2 gap-1">
         <button
@@ -1241,8 +1316,8 @@
             >
               {#if activeZoneFor('connection', conn.id) === 'before'}<div class="absolute top-0 left-0 right-0 h-0.5 bg-sky-500 z-10 pointer-events-none"></div>{/if}
               {#if activeZoneFor('connection', conn.id) === 'after'}<div class="absolute bottom-0 left-0 right-0 h-0.5 bg-sky-500 z-10 pointer-events-none"></div>{/if}
-              <button data-dnd-bar class="w-full flex items-center justify-between px-2 py-1.5 rounded-lg text-xs font-semibold transition-colors hover:bg-white/5 group" onpointerdown={onRowPointerDown} onclick={(e) => onRowClick(e, () => toggleConnectionCollapse(conn.id))}>
-                <div class="flex items-center gap-2 overflow-hidden">
+              <button data-dnd-bar class="relative w-full flex items-center justify-between px-2 py-1.5 rounded-lg text-xs font-semibold transition-colors hover:bg-white/5 group" onpointerdown={onRowPointerDown} onclick={(e) => onRowClick(e, () => toggleConnectionCollapse(conn.id))}>
+                <div class="flex items-center gap-2 overflow-hidden min-w-0 flex-1 pr-1">
                   <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0 text-sky-400 transition-transform {conn.collapsed ? '-rotate-90' : ''}" data-tooltip={conn.collapsed ? 'Expand connection' : 'Collapse connection'} data-tooltip-pos="bottom-right"><polyline points="6 9 12 15 18 9"/></svg>
                   <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0 text-sky-400" data-tooltip="Server connection" data-tooltip-pos="bottom-right"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
                   <span
@@ -1250,7 +1325,7 @@
                     title="Click to expand/collapse"
                   >{conn.name}</span>
                 </div>
-                <div class="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity" data-no-drag>
+                <div class="absolute right-1 top-1/2 -translate-y-1/2 z-10 flex items-center gap-1 opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto transition-opacity pl-3 bg-gradient-to-l from-slate-950 from-60% to-transparent rounded-md" data-no-drag>
                   <div role="button" tabindex="0" data-tooltip="Edit connection variables" data-tooltip-pos="bottom-left" onclick={(e) => openVariables({ kind: 'connection', connectionId: conn.id }, `Variables · ${conn.name}`, e)} onkeydown={(e) => e.key === 'Enter' && openVariables({ kind: 'connection', connectionId: conn.id }, `Variables · ${conn.name}`)} class="p-0.5 text-slate-500 hover:text-cyan-400 rounded hover:bg-cyan-500/20 transition-colors">
                     <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9h16"/><path d="M4 15h16"/><path d="M10 3 8 21"/><path d="m16 3-2 18"/></svg>
                   </div>
@@ -1286,8 +1361,8 @@
                     >
                       {#if activeZoneFor('project', project.id) === 'before'}<div class="absolute top-0 left-0 right-0 h-0.5 bg-amber-500 z-10 pointer-events-none"></div>{/if}
                       {#if activeZoneFor('project', project.id) === 'after'}<div class="absolute bottom-0 left-0 right-0 h-0.5 bg-amber-500 z-10 pointer-events-none"></div>{/if}
-                      <button data-dnd-bar class="w-full flex items-center justify-between px-2 py-1 rounded-md text-xs transition-colors hover:bg-white/5 group" onpointerdown={onRowPointerDown} onclick={(e) => onRowClick(e, () => toggleProjectCollapse(connId, project.id))}>
-                        <div class="flex items-center gap-2 overflow-hidden">
+                      <button data-dnd-bar class="relative w-full flex items-center justify-between px-2 py-1 rounded-md text-xs transition-colors hover:bg-white/5 group" onpointerdown={onRowPointerDown} onclick={(e) => onRowClick(e, () => toggleProjectCollapse(connId, project.id))}>
+                        <div class="flex items-center gap-2 overflow-hidden min-w-0 flex-1 pr-1">
                           <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0 text-amber-400 transition-transform {project.collapsed ? '-rotate-90' : ''}" data-tooltip={project.collapsed ? 'Expand project' : 'Collapse project'} data-tooltip-pos="bottom-right"><polyline points="6 9 12 15 18 9"/></svg>
                           <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0 text-amber-400" data-tooltip="Project workspace" data-tooltip-pos="bottom-right"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
                           <span
@@ -1295,7 +1370,7 @@
                             title="Click to expand/collapse"
                           >{project.name}</span>
                         </div>
-                        <div class="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity" data-no-drag>
+                        <div class="absolute right-1 top-1/2 -translate-y-1/2 z-10 flex items-center gap-1 opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto transition-opacity pl-3 bg-gradient-to-l from-slate-950 from-60% to-transparent rounded-md" data-no-drag>
                           <div role="button" tabindex="0" data-tooltip="Edit project variables" data-tooltip-pos="bottom-left" onclick={(e) => openVariables({ kind: 'project', projectId: project.id }, `Variables · ${project.name}`, e)} onkeydown={(e) => e.key === 'Enter' && openVariables({ kind: 'project', projectId: project.id }, `Variables · ${project.name}`)} class="p-0.5 text-slate-500 hover:text-cyan-400 rounded hover:bg-cyan-500/20 transition-colors">
                             <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9h16"/><path d="M4 15h16"/><path d="M10 3 8 21"/><path d="m16 3-2 18"/></svg>
                           </div>
@@ -1337,11 +1412,11 @@
                               {#if activeZoneFor('terminal', terminal.id) === 'after'}<div class="absolute bottom-0 left-0 right-0 h-0.5 bg-sky-400 z-10 pointer-events-none"></div>{/if}
                               <button
                                 data-dnd-bar
-                                class="w-full flex items-center justify-between px-2 py-1 rounded-md text-xs transition-all group {activeTerminalId === terminal.id ? 'bg-sky-500/10 text-sky-400 ring-1 ring-sky-500/30' : 'text-slate-400 hover:bg-white/5 hover:text-slate-200'}"
+                                class="relative w-full flex items-center justify-between px-2 py-1 rounded-md text-xs transition-all group {activeTerminalId === terminal.id ? 'bg-sky-500/10 text-sky-400 ring-1 ring-sky-500/30' : 'text-slate-400 hover:bg-white/5 hover:text-slate-200'}"
                                 onpointerdown={onRowPointerDown}
                                 onclick={(e) => onRowClick(e, () => handleSelectTerminal(terminal.id))}
                               >
-                                <div class="flex items-center gap-1.5 overflow-hidden">
+                                <div class="flex items-center gap-1.5 overflow-hidden min-w-0 flex-1 pr-1">
                                   <!-- Expand arrow for saved commands -->
                                   <div
                                     role="button" tabindex="0" data-no-drag data-tooltip="Saved command shortcuts" data-tooltip-pos="bottom-left"
@@ -1360,7 +1435,7 @@
                                     data-tooltip-pos="bottom-right"
                                   >{terminal.name}</span>
                                 </div>
-                                <div class="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-all" data-no-drag>
+                                <div class="absolute right-1 top-1/2 -translate-y-1/2 z-10 flex items-center gap-0.5 opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto transition-opacity pl-3 bg-gradient-to-l from-slate-950 from-60% to-transparent rounded-md" data-no-drag>
                                   <div role="button" tabindex="0" data-tooltip={terminal.gridHidden ? 'Show in grid view' : 'Hide from grid view'} data-tooltip-pos="bottom-left" onclick={(e) => { e.stopPropagation(); toggleTerminalGridHidden(connId, project.id, terminal.id); }} onkeydown={(e) => e.key === 'Enter' && toggleTerminalGridHidden(connId, project.id, terminal.id)} class="p-0.5 rounded transition-colors {terminal.gridHidden ? 'text-slate-600 hover:text-slate-400' : 'text-sky-400 bg-sky-500/10 hover:bg-sky-500/20'}">
                                     <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                                       {#if terminal.gridHidden}
@@ -1463,43 +1538,56 @@
                                               <svg xmlns="http://www.w3.org/2000/svg" width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
                                             </button>
                                           {/if}
-                                          <!-- Run button -->
+                                          <!-- Label / run surface: also the drag handle for this row.
+                                               Must NOT be data-no-drag — that blocked all command reordering
+                                               because this flex-1 button covers nearly the whole row.
+                                               Click still runs the command; a completed drag suppresses it. -->
                                           <button
-                                            data-no-drag
+                                            type="button"
                                             data-tooltip="{cmd.sendCtrlCBefore ? '(Ctrl+C) ' : ''}{cmd.autoExecute !== false ? 'Execute: ' : 'Inject: '}{cmd.command}"
                                             data-tooltip-pos="top-left"
-                                            onclick={(e) => handleRunCommand(terminal.id, cmd.command, cmd.autoExecute !== false, !!cmd.sendCtrlCBefore, e)}
-                                            class="flex-1 text-left truncate text-slate-400 hover:text-white transition-colors px-1"
+                                            onclick={(e) => {
+                                              if (pointerDragCommitted) {
+                                                pointerDragCommitted = false;
+                                                e.preventDefault();
+                                                e.stopPropagation();
+                                                return;
+                                              }
+                                              handleRunCommand(terminal.id, cmd.command, cmd.autoExecute !== false, !!cmd.sendCtrlCBefore, e);
+                                            }}
+                                            class="min-w-0 flex-1 text-left truncate text-slate-400 hover:text-white transition-colors px-1 cursor-grab active:cursor-grabbing"
                                           >
                                             <span class="font-medium text-slate-300">{cmd.label}</span>
                                             <span class="text-slate-600 ml-1">→ {cmd.command}</span>
                                           </button>
-                                          <!-- Duplicate -->
-                                          <div
-                                            role="button" tabindex="0" data-no-drag data-tooltip="Duplicate command shortcut" data-tooltip-pos="top-left"
-                                            onclick={(e) => { e.stopPropagation(); duplicateSavedCommand(connId, project.id, terminal.id, cmd.id); }}
-                                            onkeydown={(e) => e.key === 'Enter' && duplicateSavedCommand(connId, project.id, terminal.id, cmd.id)}
-                                            class="shrink-0 p-0.5 text-slate-600 hover:text-sky-400 rounded hover:bg-sky-500/20 transition-colors opacity-0 group-hover/cmd:opacity-100"
-                                          >
-                                            <svg xmlns="http://www.w3.org/2000/svg" width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
-                                          </div>
-                                          <!-- Edit -->
-                                          <div
-                                            role="button" tabindex="0" data-no-drag data-tooltip="Edit command shortcut" data-tooltip-pos="top-left"
-                                            onclick={(e) => handleEditCommand(connId, project.id, terminal.id, cmd, e)}
-                                            onkeydown={(e) => e.key === 'Enter' && handleEditCommand(connId, project.id, terminal.id, cmd, e)}
-                                            class="shrink-0 p-0.5 text-slate-600 hover:text-sky-400 rounded hover:bg-sky-500/20 transition-colors opacity-0 group-hover/cmd:opacity-100"
-                                          >
-                                            <svg xmlns="http://www.w3.org/2000/svg" width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
-                                          </div>
-                                          <!-- Remove -->
-                                          <div
-                                            role="button" tabindex="0" data-no-drag data-tooltip="Remove command shortcut" data-tooltip-pos="top-left"
-                                            onclick={(e) => handleRemoveSavedCommand(connId, project.id, terminal.id, cmd.id, e)}
-                                            onkeydown={(e) => e.key === 'Enter' && handleRemoveSavedCommand(connId, project.id, terminal.id, cmd.id, e)}
-                                            class="shrink-0 p-0.5 text-slate-600 hover:text-rose-400 rounded hover:bg-rose-500/20 transition-colors opacity-0 group-hover/cmd:opacity-100"
-                                          >
-                                            <svg xmlns="http://www.w3.org/2000/svg" width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                                          <div class="absolute right-0.5 top-1/2 -translate-y-1/2 z-10 flex items-center gap-0.5 opacity-0 pointer-events-none group-hover/cmd:opacity-100 group-hover/cmd:pointer-events-auto transition-opacity pl-2 bg-gradient-to-l from-slate-950 from-60% to-transparent rounded-md" data-no-drag>
+                                            <!-- Duplicate -->
+                                            <div
+                                              role="button" tabindex="0" data-tooltip="Duplicate command shortcut" data-tooltip-pos="top-left"
+                                              onclick={(e) => { e.stopPropagation(); duplicateSavedCommand(connId, project.id, terminal.id, cmd.id); }}
+                                              onkeydown={(e) => e.key === 'Enter' && duplicateSavedCommand(connId, project.id, terminal.id, cmd.id)}
+                                              class="shrink-0 p-0.5 text-slate-600 hover:text-sky-400 rounded hover:bg-sky-500/20 transition-colors"
+                                            >
+                                              <svg xmlns="http://www.w3.org/2000/svg" width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                                            </div>
+                                            <!-- Edit -->
+                                            <div
+                                              role="button" tabindex="0" data-tooltip="Edit command shortcut" data-tooltip-pos="top-left"
+                                              onclick={(e) => handleEditCommand(connId, project.id, terminal.id, cmd, e)}
+                                              onkeydown={(e) => e.key === 'Enter' && handleEditCommand(connId, project.id, terminal.id, cmd, e)}
+                                              class="shrink-0 p-0.5 text-slate-600 hover:text-sky-400 rounded hover:bg-sky-500/20 transition-colors"
+                                            >
+                                              <svg xmlns="http://www.w3.org/2000/svg" width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+                                            </div>
+                                            <!-- Remove -->
+                                            <div
+                                              role="button" tabindex="0" data-tooltip="Remove command shortcut" data-tooltip-pos="top-left"
+                                              onclick={(e) => handleRemoveSavedCommand(connId, project.id, terminal.id, cmd.id, e)}
+                                              onkeydown={(e) => e.key === 'Enter' && handleRemoveSavedCommand(connId, project.id, terminal.id, cmd.id, e)}
+                                              class="shrink-0 p-0.5 text-slate-600 hover:text-rose-400 rounded hover:bg-rose-500/20 transition-colors"
+                                            >
+                                              <svg xmlns="http://www.w3.org/2000/svg" width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                                            </div>
                                           </div>
                                         </div>
                                       {/each}
@@ -1529,8 +1617,8 @@
                       >
                         {#if activeZoneFor('project-group', group.id) === 'before'}<div class="absolute top-0 left-0 right-0 h-0.5 bg-violet-500 z-10 pointer-events-none"></div>{/if}
                         {#if activeZoneFor('project-group', group.id) === 'after'}<div class="absolute bottom-0 left-0 right-0 h-0.5 bg-violet-500 z-10 pointer-events-none"></div>{/if}
-                        <button data-dnd-bar class="w-full flex items-center justify-between px-2 py-1.5 rounded-md text-xs transition-colors hover:bg-white/5 group/pg" onpointerdown={onRowPointerDown} onclick={(e) => onRowClick(e, () => toggleProjectGroupCollapse(conn.id, group.id))}>
-                          <div class="flex items-center gap-2 overflow-hidden">
+                        <button data-dnd-bar class="relative w-full flex items-center justify-between px-2 py-1.5 rounded-md text-xs transition-colors hover:bg-white/5 group/pg" onpointerdown={onRowPointerDown} onclick={(e) => onRowClick(e, () => toggleProjectGroupCollapse(conn.id, group.id))}>
+                          <div class="flex items-center gap-2 overflow-hidden min-w-0 flex-1 pr-1">
                             <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0 text-violet-400 transition-transform {group.collapsed ? '-rotate-90' : ''}" data-tooltip={group.collapsed ? 'Expand project group' : 'Collapse project group'} data-tooltip-pos="bottom-right"><polyline points="6 9 12 15 18 9"/></svg>
                             <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0 text-violet-400" data-tooltip="Project group" data-tooltip-pos="bottom-right"><path d="M15.5 17.5H22a2 2 0 0 0 2-2v-8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L11.6 3.4a2 2 0 0 0-1.67-.9H4a2 2 0 0 0-2 2v12.5a2 2 0 0 0 2 2h1.5"/><path d="M5 17.5v3A2 2 0 0 0 7 22.5h15a2 2 0 0 0 2-2v-3"/></svg>
                             <span
@@ -1538,7 +1626,7 @@
                               title="Click to expand/collapse"
                             >{group.name}</span>
                           </div>
-                          <div class="flex items-center gap-1 opacity-0 group-hover/pg:opacity-100 transition-opacity" data-no-drag>
+                          <div class="absolute right-1 top-1/2 -translate-y-1/2 z-10 flex items-center gap-1 opacity-0 pointer-events-none group-hover/pg:opacity-100 group-hover/pg:pointer-events-auto transition-opacity pl-3 bg-gradient-to-l from-slate-950 from-60% to-transparent rounded-md" data-no-drag>
                             <div role="button" tabindex="0" data-tooltip="Edit project group variables" data-tooltip-pos="bottom-left" onclick={(e) => openVariables({ kind: 'projectGroup', connectionId: conn.id, projectGroupId: group.id }, `Variables · ${group.name}`, e)} onkeydown={(e) => e.key === 'Enter' && openVariables({ kind: 'projectGroup', connectionId: conn.id, projectGroupId: group.id }, `Variables · ${group.name}`)} class="p-0.5 text-slate-500 hover:text-cyan-400 rounded hover:bg-cyan-500/20 transition-colors">
                               <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9h16"/><path d="M4 15h16"/><path d="M10 3 8 21"/><path d="m16 3-2 18"/></svg>
                             </div>
@@ -1593,8 +1681,8 @@
             >
               {#if activeZoneFor('group', group.id) === 'before'}<div class="absolute top-0 left-0 right-0 h-0.5 bg-indigo-500 z-10 pointer-events-none"></div>{/if}
               {#if activeZoneFor('group', group.id) === 'after'}<div class="absolute bottom-0 left-0 right-0 h-0.5 bg-indigo-500 z-10 pointer-events-none"></div>{/if}
-              <button data-dnd-bar class="w-full flex items-center justify-between px-2 py-1.5 rounded-lg text-xs font-semibold transition-colors hover:bg-white/5 group" onpointerdown={onRowPointerDown} onclick={(e) => onRowClick(e, () => toggleGroupCollapse(group.id))}>
-                <div class="flex items-center gap-2 overflow-hidden">
+              <button data-dnd-bar class="relative w-full flex items-center justify-between px-2 py-1.5 rounded-lg text-xs font-semibold transition-colors hover:bg-white/5 group" onpointerdown={onRowPointerDown} onclick={(e) => onRowClick(e, () => toggleGroupCollapse(group.id))}>
+                <div class="flex items-center gap-2 overflow-hidden min-w-0 flex-1 pr-1">
                   <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0 text-indigo-400 transition-transform {group.collapsed ? '-rotate-90' : ''}" data-tooltip={group.collapsed ? 'Expand group' : 'Collapse group'} data-tooltip-pos="bottom-right"><polyline points="6 9 12 15 18 9"/></svg>
                   <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0 text-indigo-400" data-tooltip="Custom terminal group" data-tooltip-pos="bottom-right"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
                   <span
@@ -1602,7 +1690,7 @@
                     title="Click to expand/collapse"
                   >{group.name}</span>
                 </div>
-                <div class="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity" data-no-drag>
+                <div class="absolute right-1 top-1/2 -translate-y-1/2 z-10 flex items-center gap-1 opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto transition-opacity pl-3 bg-gradient-to-l from-slate-950 from-60% to-transparent rounded-md" data-no-drag>
                   <div role="button" tabindex="0" data-tooltip="Edit terminal group variables" data-tooltip-pos="bottom-left" onclick={(e) => openVariables({ kind: 'terminalGroup', terminalGroupId: group.id }, `Variables · ${group.name}`, e)} onkeydown={(e) => e.key === 'Enter' && openVariables({ kind: 'terminalGroup', terminalGroupId: group.id }, `Variables · ${group.name}`)} class="p-0.5 text-slate-500 hover:text-cyan-400 rounded hover:bg-cyan-500/20 transition-colors">
                     <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9h16"/><path d="M4 15h16"/><path d="M10 3 8 21"/><path d="m16 3-2 18"/></svg>
                   </div>
@@ -1643,15 +1731,15 @@
                           {#if activeZoneFor('group-terminal', terminal.id) === 'after'}<div class="absolute bottom-0 left-0 right-0 h-0.5 bg-indigo-400 z-10 pointer-events-none"></div>{/if}
                           <button
                             data-dnd-bar
-                            class="w-full flex items-center justify-between px-2 py-1 rounded-md text-xs transition-all group {activeTerminalId === terminal.id ? 'bg-sky-500/10 text-sky-400 ring-1 ring-sky-500/30' : 'text-slate-400 hover:bg-white/5 hover:text-slate-200'}"
+                            class="relative w-full flex items-center justify-between px-2 py-1 rounded-md text-xs transition-all group {activeTerminalId === terminal.id ? 'bg-sky-500/10 text-sky-400 ring-1 ring-sky-500/30' : 'text-slate-400 hover:bg-white/5 hover:text-slate-200'}"
                             onclick={() => handleSelectTerminal(terminal.id)}
                           >
-                            <div class="flex items-center gap-1.5 overflow-hidden">
+                            <div class="flex items-center gap-1.5 overflow-hidden min-w-0 flex-1 pr-1">
                               <div class={`w-1.5 h-1.5 rounded-full shrink-0 ${!isMounted ? 'bg-slate-600' : (isConn ? 'bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.5)]' : 'bg-rose-500 shadow-[0_0_6px_rgba(244,63,94,0.5)]')}`} data-tooltip={!isMounted ? 'Not initialized' : (isConn ? 'Connected' : 'Disconnected')} data-tooltip-pos="bottom-right"></div>
                               <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0" data-tooltip="Terminal session" data-tooltip-pos="bottom-right"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
                               <span class="truncate">{terminal.name}</span>
                             </div>
-                            <div class="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-all" data-no-drag>
+                            <div class="absolute right-1 top-1/2 -translate-y-1/2 z-10 flex items-center gap-0.5 opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto transition-opacity pl-3 bg-gradient-to-l from-slate-950 from-60% to-transparent rounded-md" data-no-drag>
                               <div role="button" tabindex="0" data-tooltip="Remove terminal from group" data-tooltip-pos="bottom-left" onclick={(e) => handleRemoveTerminalFromGroup(group.id, terminal.id, e)} onkeydown={(e) => e.key === 'Enter' && handleRemoveTerminalFromGroup(group.id, terminal.id, e)} class="p-0.5 text-slate-500 hover:text-rose-400 rounded hover:bg-rose-500/20 transition-colors">
                                 <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
                               </div>
@@ -1675,16 +1763,16 @@
               {@const isConn = !!connectionStatuses[terminal.id]}
               <div class="mb-0.5">
                 <button
-                  class="w-full flex items-center justify-between px-2 py-1 rounded-md text-xs transition-all group {activeTerminalId === terminal.id ? 'bg-sky-500/10 text-sky-400 ring-1 ring-sky-500/30' : 'text-slate-400 hover:bg-white/5 hover:text-slate-200'}"
+                  class="relative w-full flex items-center justify-between px-2 py-1 rounded-md text-xs transition-all group {activeTerminalId === terminal.id ? 'bg-sky-500/10 text-sky-400 ring-1 ring-sky-500/30' : 'text-slate-400 hover:bg-white/5 hover:text-slate-200'}"
                   onclick={() => handleSelectTerminal(terminal.id)}
                 >
-                  <div class="flex items-center gap-1.5 overflow-hidden">
+                  <div class="flex items-center gap-1.5 overflow-hidden min-w-0 flex-1 pr-1">
                     <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0 text-amber-400" data-tooltip="Pinned terminal" data-tooltip-pos="bottom-right"><path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"/></svg>
                     <div class={`w-1.5 h-1.5 rounded-full shrink-0 ${!isMounted ? 'bg-slate-600' : (isConn ? 'bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.5)]' : 'bg-rose-500 shadow-[0_0_6px_rgba(244,63,94,0.5)]')}`} data-tooltip={!isMounted ? 'Not initialized' : (isConn ? 'Connected' : 'Disconnected')} data-tooltip-pos="bottom-right"></div>
                     <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0" data-tooltip="Terminal session" data-tooltip-pos="bottom-right"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
                     <span class="truncate">{terminal.name}</span>
                   </div>
-                  <div class="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-all" data-no-drag>
+                  <div class="absolute right-1 top-1/2 -translate-y-1/2 z-10 flex items-center gap-0.5 opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto transition-opacity pl-3 bg-gradient-to-l from-slate-950 from-60% to-transparent rounded-md" data-no-drag>
                     <div role="button" tabindex="0" data-tooltip="Unpin terminal" data-tooltip-pos="bottom-left" onclick={(e) => { e.stopPropagation(); toggleTerminalPinned(terminal.connId, terminal.projectId, terminal.id); }} onkeydown={(e) => e.key === 'Enter' && toggleTerminalPinned(terminal.connId, terminal.projectId, terminal.id)} class="p-0.5 text-amber-400 hover:text-amber-300 rounded hover:bg-amber-500/20 transition-colors">
                       <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"/></svg>
                     </div>
@@ -1725,10 +1813,12 @@
 
     <!-- Terminal Workspace -->
     <div
+      bind:this={workspaceEl}
       class="flex-1 min-w-0 bg-slate-900/30 p-3 relative"
       class:grid-mode={!!gridViewProjectId}
       class:overflow-hidden={!gridViewProjectId || !currentGridConfig.rows}
       class:overflow-y-auto={!!gridViewProjectId && !!currentGridConfig.rows}
+      class:pointer-events-none={isResizingSidebar || !!dragState}
       id="workspace"
       style={gridViewProjectId ? [
         currentGridConfig.columns ? `grid-template-columns: repeat(${currentGridConfig.columns}, 1fr);` : '',
@@ -1784,16 +1874,15 @@
     </div>
   </main>
 
-  <!-- Copy-mode badge during shift-drag -->
-  {#if dragState && dragCopy && dragCursorXY}
-    <div
-      class="fixed z-[200] pointer-events-none flex items-center gap-1 rounded-md bg-sky-500 px-1.5 py-0.5 text-[10px] font-bold text-white shadow-lg"
-      style="left: {dragCursorXY.x + 12}px; top: {dragCursorXY.y - 22}px;"
-    >
-      <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
-      Copy
-    </div>
-  {/if}
+  <!-- Copy-mode badge during shift-drag (shown/positioned via DOM in onPointerDown) -->
+  <div
+    bind:this={copyBadgeEl}
+    class="fixed z-[200] pointer-events-none items-center gap-1 rounded-md bg-sky-500 px-1.5 py-0.5 text-[10px] font-bold text-white shadow-lg"
+    style="display: none; left: 0; top: 0;"
+  >
+    <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
+    Copy
+  </div>
 
   <!-- Dialog -->
   {#if dialogState.isOpen}
