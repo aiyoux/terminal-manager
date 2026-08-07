@@ -243,8 +243,9 @@ test.describe('Session features regression', () => {
     await page.reload();
     await expect(page.locator('body')).toBeVisible();
 
-    // Expand connections tab and find remove button via tooltip
-    await page.getByRole('button', { name: 'Connections' }).click();
+    // Ensure connections tab route (tabs are links so refresh keeps the tab)
+    await page.getByRole('link', { name: 'Connections' }).click();
+    await expect(page).toHaveURL(/\/connections\/?$/);
 
     // Hover connection row to reveal actions - click remove for our connection
     // Scope by text then find remove control nearby
@@ -469,6 +470,22 @@ test.describe('Session features regression', () => {
     }, setup!.id);
 
     expect(after).toBe(!before);
+  });
+
+  test('UI: sidebar tabs are routes and survive refresh', async ({ page }) => {
+    await page.getByRole('link', { name: 'Groups' }).click();
+    await expect(page).toHaveURL(/\/groups\/?$/);
+    await page.reload();
+    await expect(page).toHaveURL(/\/groups\/?$/);
+    await expect(page.getByRole('link', { name: 'Groups' })).toHaveAttribute('aria-current', 'page');
+
+    await page.getByRole('link', { name: 'Pinned' }).click();
+    await expect(page).toHaveURL(/\/pinned\/?$/);
+    await page.reload();
+    await expect(page).toHaveURL(/\/pinned\/?$/);
+
+    await page.goto('/');
+    await expect(page).toHaveURL(/\/connections\/?$/);
   });
 
   test('UI: a drag past the threshold does not toggle collapse', async ({ page }) => {

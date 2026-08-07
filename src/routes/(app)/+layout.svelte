@@ -1,8 +1,11 @@
 <script lang="ts">
+  import { page } from '$app/state';
   import Terminal from '$lib/components/Terminal.svelte';
   import VariablesEditor from '$lib/components/VariablesEditor.svelte';
   import TextReplaceModal from '$lib/components/TextReplaceModal.svelte';
   import { closeConnection, sendInput, isConnected, reconnectConnection, connectionStatuses } from '$lib/connectionManager.svelte';
+
+  let { children } = $props();
   import {
     getConnections,
     getTerminalGroups,
@@ -88,7 +91,15 @@
   let activeTerminalId = $derived(getActiveTerminalId());
   let activeWsUrl = $derived(getWsUrlForTerminal(activeTerminalId));
 
-  let activeSidebarTab = $state<'connections' | 'groups' | 'pinned'>('connections');
+  type SidebarTab = 'connections' | 'groups' | 'pinned';
+
+  /** Driven by the URL so refresh keeps the active sidebar tab. */
+  let activeSidebarTab = $derived.by((): SidebarTab => {
+    const path = page.url.pathname;
+    if (path === '/groups' || path.startsWith('/groups/')) return 'groups';
+    if (path === '/pinned' || path.startsWith('/pinned/')) return 'pinned';
+    return 'connections';
+  });
 
   // --- Sidebar view settings ---
   const VIEW_SETTINGS_KEY = 'terminal-dashboard-view-settings';
@@ -699,6 +710,28 @@
   });
   let pinnedTerminals = $derived(allTerminals.filter(t => t.pinned));
 
+  // Pinned route owns the pinned multi-terminal grid; leaving it clears that mode.
+  $effect(() => {
+    if (activeSidebarTab === 'pinned') {
+      if (gridViewConnId !== '__pinned__') {
+        gridViewProjectId = '__pinned__';
+        gridViewConnId = '__pinned__';
+        setActiveTerminalId('');
+      }
+      let changed = false;
+      for (const t of pinnedTerminals) {
+        if (!mountedTerminalIds.has(t.id)) {
+          mountedTerminalIds.add(t.id);
+          changed = true;
+        }
+      }
+      if (changed) mountedTerminalIds = new Set(mountedTerminalIds);
+    } else if (gridViewConnId === '__pinned__') {
+      gridViewConnId = '';
+      gridViewProjectId = '';
+    }
+  });
+
   // Auto-mount terminal when it becomes active
   $effect(() => {
     if (activeTerminalId && !mountedTerminalIds.has(activeTerminalId)) {
@@ -1251,37 +1284,33 @@
         : `width: ${sidebarOpen ? sidebarWidth + 'px' : '0px'}; opacity: ${sidebarOpen ? 1 : 0}`}
     >
       <div class="flex items-center border-b border-white/5 p-2 gap-1">
-        <button
-          class="flex-1 py-1.5 text-xs font-semibold rounded-md transition-colors {activeSidebarTab === 'connections' ? 'bg-white/10 text-white' : 'text-slate-500 hover:text-slate-300 hover:bg-white/5'}"
-          onclick={() => { activeSidebarTab = 'connections'; if (gridViewConnId === '__pinned__') { gridViewConnId = ''; gridViewProjectId = ''; } }}
+        <a
+          href="/connections"
+          class="flex-1 py-1.5 text-center text-xs font-semibold rounded-md transition-colors {activeSidebarTab === 'connections' ? 'bg-white/10 text-white' : 'text-slate-500 hover:text-slate-300 hover:bg-white/5'}"
           data-tooltip="View server connections and project workspaces"
           data-tooltip-pos="bottom"
+          aria-current={activeSidebarTab === 'connections' ? 'page' : undefined}
         >
           Connections
-        </button>
-        <button
-          class="flex-1 py-1.5 text-xs font-semibold rounded-md transition-colors {activeSidebarTab === 'groups' ? 'bg-white/10 text-white' : 'text-slate-500 hover:text-slate-300 hover:bg-white/5'}"
-          onclick={() => { activeSidebarTab = 'groups'; if (gridViewConnId === '__pinned__') { gridViewConnId = ''; gridViewProjectId = ''; } }}
+        </a>
+        <a
+          href="/groups"
+          class="flex-1 py-1.5 text-center text-xs font-semibold rounded-md transition-colors {activeSidebarTab === 'groups' ? 'bg-white/10 text-white' : 'text-slate-500 hover:text-slate-300 hover:bg-white/5'}"
           data-tooltip="View custom multi-terminal layout groups"
           data-tooltip-pos="bottom"
+          aria-current={activeSidebarTab === 'groups' ? 'page' : undefined}
         >
           Groups
-        </button>
-        <button
-          class="flex-1 py-1.5 text-xs font-semibold rounded-md transition-colors {activeSidebarTab === 'pinned' ? 'bg-white/10 text-white' : 'text-slate-500 hover:text-slate-300 hover:bg-white/5'}"
-          onclick={() => {
-            activeSidebarTab = 'pinned';
-            gridViewProjectId = '__pinned__';
-            gridViewConnId = '__pinned__';
-            setActiveTerminalId('');
-            for (const t of pinnedTerminals) mountedTerminalIds.add(t.id);
-            mountedTerminalIds = new Set(mountedTerminalIds);
-          }}
+        </a>
+        <a
+          href="/pinned"
+          class="flex-1 py-1.5 text-center text-xs font-semibold rounded-md transition-colors {activeSidebarTab === 'pinned' ? 'bg-white/10 text-white' : 'text-slate-500 hover:text-slate-300 hover:bg-white/5'}"
           data-tooltip="View pinned active terminals"
           data-tooltip-pos="bottom"
+          aria-current={activeSidebarTab === 'pinned' ? 'page' : undefined}
         >
           Pinned
-        </button>
+        </a>
       </div>
 
       <!-- View settings (below tabs, above section labels) -->
@@ -2010,6 +2039,10 @@
       onClose={() => { textReplaceRef = null; }}
     />
   {/if}
+
+  <!-- Child tab routes are intentionally empty; this layout owns the UI so
+       terminals stay mounted when switching Connections / Groups / Pinned. -->
+  <div class="hidden" aria-hidden="true">{@render children()}</div>
 </div>
 
 <style>
