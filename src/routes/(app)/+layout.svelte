@@ -1208,6 +1208,16 @@
   let now = $state(new Date());
   setInterval(() => { now = new Date(); }, 1000);
 
+  function nudgeGridColumns(delta: number) {
+    const next = Math.max(0, Math.min(12, (currentGridConfig.columns || 0) + delta));
+    setGridLayout(next, currentGridConfig.rows);
+  }
+
+  function nudgeGridRows(delta: number) {
+    const next = Math.max(0, Math.min(12, (currentGridConfig.rows || 0) + delta));
+    setGridLayout(currentGridConfig.columns, next);
+  }
+
   function toggleGridView(connId: string, projectIdOrGroupId: string, e: Event) {
     e.stopPropagation();
     if (gridViewProjectId === projectIdOrGroupId) {
@@ -1279,7 +1289,7 @@
 
       <div class="w-px h-4 bg-white/5 mr-1"></div>
       <div class="flex items-center gap-1.5">
-        <label class="flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11px] font-semibold tracking-wide text-slate-400 hover:text-violet-400 hover:bg-violet-500/10 transition-all" data-tooltip="Set fixed grid columns count (leave blank for auto)" data-tooltip-pos="bottom">
+        <div class="flex items-center gap-1 px-2 py-1 rounded-lg text-[11px] font-semibold tracking-wide text-slate-400 hover:text-violet-400 hover:bg-violet-500/10 transition-all" data-tooltip="Set fixed grid columns count (0 = auto)" data-tooltip-pos="bottom">
           <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
           <span>COLS</span>
           <input
@@ -1288,14 +1298,32 @@
             max="12"
             value={currentGridConfig.columns || ''}
             placeholder="Auto"
-            class="w-10 bg-transparent border-b border-white/10 text-[11px] font-semibold text-slate-300 text-center focus:outline-none focus:border-violet-400 transition-colors [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+            class="w-8 bg-transparent border-b border-white/10 text-[11px] font-semibold text-slate-300 text-center focus:outline-none focus:border-violet-400 transition-colors [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
             oninput={(e) => {
               const val = parseInt((e.target as HTMLInputElement).value) || 0;
-              setGridLayout(val, currentGridConfig.rows);
+              setGridLayout(Math.max(0, Math.min(12, val)), currentGridConfig.rows);
             }}
           />
-        </label>
-        <label class="flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11px] font-semibold tracking-wide text-slate-400 hover:text-violet-400 hover:bg-violet-500/10 transition-all" data-tooltip="Set fixed grid rows count (leave blank for auto)" data-tooltip-pos="bottom">
+          <div class="flex flex-col -space-y-0.5 ml-0.5">
+            <button
+              type="button"
+              class="p-0.5 text-slate-500 hover:text-violet-300 rounded leading-none"
+              aria-label="Increase columns"
+              onclick={(e) => { e.preventDefault(); nudgeGridColumns(1); }}
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="18 15 12 9 6 15"/></svg>
+            </button>
+            <button
+              type="button"
+              class="p-0.5 text-slate-500 hover:text-violet-300 rounded leading-none"
+              aria-label="Decrease columns"
+              onclick={(e) => { e.preventDefault(); nudgeGridColumns(-1); }}
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+            </button>
+          </div>
+        </div>
+        <div class="flex items-center gap-1 px-2 py-1 rounded-lg text-[11px] font-semibold tracking-wide text-slate-400 hover:text-violet-400 hover:bg-violet-500/10 transition-all" data-tooltip="Set fixed grid rows count (0 = auto)" data-tooltip-pos="bottom">
           <span>ROWS</span>
           <input
             type="number"
@@ -1303,13 +1331,31 @@
             max="12"
             value={currentGridConfig.rows || ''}
             placeholder="Auto"
-            class="w-10 bg-transparent border-b border-white/10 text-[11px] font-semibold text-slate-300 text-center focus:outline-none focus:border-violet-400 transition-colors [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+            class="w-8 bg-transparent border-b border-white/10 text-[11px] font-semibold text-slate-300 text-center focus:outline-none focus:border-violet-400 transition-colors [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
             oninput={(e) => {
               const val = parseInt((e.target as HTMLInputElement).value) || 0;
-              setGridLayout(currentGridConfig.columns, val);
+              setGridLayout(currentGridConfig.columns, Math.max(0, Math.min(12, val)));
             }}
           />
-        </label>
+          <div class="flex flex-col -space-y-0.5 ml-0.5">
+            <button
+              type="button"
+              class="p-0.5 text-slate-500 hover:text-violet-300 rounded leading-none"
+              aria-label="Increase rows"
+              onclick={(e) => { e.preventDefault(); nudgeGridRows(1); }}
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="18 15 12 9 6 15"/></svg>
+            </button>
+            <button
+              type="button"
+              class="p-0.5 text-slate-500 hover:text-violet-300 rounded leading-none"
+              aria-label="Decrease rows"
+              onclick={(e) => { e.preventDefault(); nudgeGridRows(-1); }}
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+            </button>
+          </div>
+        </div>
       </div>
 
       <div class="w-px h-4 bg-white/5 mr-2"></div>
