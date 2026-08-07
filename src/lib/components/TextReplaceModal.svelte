@@ -14,6 +14,15 @@
     onClose: () => void;
   } = $props();
 
+  let backdropDown = false;
+  function onBackdropPointerDown(e: PointerEvent) {
+    backdropDown = e.target === e.currentTarget;
+  }
+  function onBackdropClick(e: MouseEvent) {
+    if (backdropDown && e.target === e.currentTarget) onClose();
+    backdropDown = false;
+  }
+
   let find = $state('');
   let replace = $state('');
   let mode = $state<'literal' | 'toVariable'>('literal');
@@ -56,7 +65,7 @@
   }
 </script>
 
-<div class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" role="dialog" aria-modal="true" aria-label="Replace in commands">
+<div class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" role="dialog" aria-modal="true" aria-label="Replace in commands" onpointerdown={onBackdropPointerDown} onclick={onBackdropClick}>
   <div class="w-full max-w-xl max-h-[85vh] overflow-hidden flex flex-col rounded-xl border border-slate-700 bg-slate-900 shadow-2xl">
     <div class="flex items-center justify-between px-4 py-3 border-b border-slate-700">
       <h2 class="text-sm font-semibold text-slate-100">Replace in commands</h2>
