@@ -69,4 +69,65 @@ test.describe('Terminal Drag & Drop Across Folders', () => {
     const count = await draggables.count();
     expect(count).toBeGreaterThanOrEqual(0);
   });
+
+  test('reorderTerminals works for projects inside project groups', async ({ page }) => {
+    const result = await page.evaluate(async () => {
+      const stores = await import('/src/lib/stores.svelte.ts');
+
+      let conn = stores.getConnections()[0];
+      if (!conn) {
+        conn = stores.addConnection('Reorder Conn', 'ws://127.0.0.1:9999/ws');
+      }
+      if (!conn) return { success: false, reason: 'no connection' };
+
+      const group = stores.addProjectGroup(conn.id, 'Reorder Group');
+      if (!group) return { success: false, reason: 'no group' };
+
+      const proj = stores.addProject(conn.id, 'Grouped Project', group.id);
+      if (!proj) return { success: false, reason: 'no project' };
+
+      const t1 = stores.addTerminal(conn.id, proj.id, 'Term A');
+      const t2 = stores.addTerminal(conn.id, proj.id, 'Term B');
+      const t3 = stores.addTerminal(conn.id, proj.id, 'Term C');
+      if (!t1 || !t2 || !t3) return { success: false, reason: 'missing terminals' };
+
+      // Move Term A (index 0) after Term B → [B, A, C]
+      stores.reorderTerminals(conn.id, proj.id, 0, 1);
+
+      const found = stores.findProjectById(proj.id)?.project;
+      const names = found?.terminals.map((t) => t.name) ?? [];
+      const ok = names[0] === 'Term B' && names[1] === 'Term A' && names[2] === 'Term C';
+      return { success: ok, reason: ok ? 'OK' : `got ${JSON.stringify(names)}`, names };
+    });
+
+    expect(result.success, result.reason).toBe(true);
+  });
+
+  test('reorderTerminals works for ungrouped projects', async ({ page }) => {
+    const result = await page.evaluate(async () => {
+      const stores = await import('/src/lib/stores.svelte.ts');
+
+      let conn = stores.getConnections()[0];
+      if (!conn) {
+        conn = stores.addConnection('Reorder Conn 2', 'ws://127.0.0.1:9999/ws');
+      }
+      if (!conn) return { success: false, reason: 'no connection' };
+
+      const proj = stores.addProject(conn.id, 'Ungrouped Project');
+      if (!proj) return { success: false, reason: 'no project' };
+
+      const t1 = stores.addTerminal(conn.id, proj.id, 'U-A');
+      const t2 = stores.addTerminal(conn.id, proj.id, 'U-B');
+      if (!t1 || !t2) return { success: false, reason: 'missing terminals' };
+
+      stores.reorderTerminals(conn.id, proj.id, 0, 1);
+
+      const found = stores.findProjectById(proj.id)?.project;
+      const names = found?.terminals.map((t) => t.name) ?? [];
+      const ok = names[0] === 'U-B' && names[1] === 'U-A';
+      return { success: ok, reason: ok ? 'OK' : `got ${JSON.stringify(names)}`, names };
+    });
+
+    expect(result.success, result.reason).toBe(true);
+  });
 });

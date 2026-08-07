@@ -375,6 +375,13 @@
     return el.parentElement?.closest<HTMLElement>('[data-dnd-row]') ?? null;
   }
 
+  /** Header bar for zone math. Expanded children (commands, nested projects)
+   *  must not stretch the before/after split — only the bar does. */
+  function dndBarRect(row: HTMLElement): DOMRect {
+    const bar = row.querySelector<HTMLElement>(':scope > [data-dnd-bar]');
+    return (bar ?? row).getBoundingClientRect();
+  }
+
   function descriptorFromDataset(el: HTMLElement): RowDescriptor | null {
     const ds = el.dataset;
     if (!ds.dndType || !ds.dndId) return null;
@@ -388,6 +395,15 @@
       terminalId: ds.dndTerminal || undefined,
       append: ds.dndAppend === '1',
     };
+  }
+
+  function isSelfDrop(drag: RowDescriptor | DragState, over: RowDescriptor): boolean {
+    return (
+      over.type === drag.type &&
+      over.id === drag.id &&
+      (over.type !== 'command' || over.terminalId === drag.terminalId) &&
+      (over.type !== 'group-terminal' || over.groupId === drag.groupId)
+    );
   }
 
   function onPointerDown(e: PointerEvent, desc: RowDescriptor) {
@@ -412,42 +428,34 @@
 
       // Walk up from the innermost data-dnd-row to find a row that accepts a
       // drop for the current drag type. Without this, dragging a terminal over
-      // its own expanded command rows would hit the command row (which has no
-      // allowed zones for a terminal drag) and the drop would silently fail.
-      let el = rowFromPoint(ev.clientX, ev.clientY);
+      // expanded command rows hits a command (no allowed zones for a terminal
+      // drag) and the drop would silently fail.
+      //
+      // Important: when the accepting row is an *ancestor* of the hit target
+      // (pointer is in expanded children under that row's header), force zone
+      // `after` so open command lists don't trap the drop in the geometric
+      // top-half "before" zone of the tall wrapper.
+      const hitEl = rowFromPoint(ev.clientX, ev.clientY);
+      let el: HTMLElement | null = hitEl;
       let t = el && descriptorFromDataset(el);
+      let walkedUp = false;
       if (t) {
-        let isSelf =
-          !dragCopy &&
-          t.type === desc.type &&
-          t.id === desc.id &&
-          (t.type !== 'command' || t.terminalId === desc.terminalId) &&
-          (t.type !== 'group-terminal' || t.groupId === desc.groupId);
-        let allowed = isSelf ? [] : allowedZones(dragState!, { targetType: t.type, connId: t.connId, groupId: t.groupId });
-        while ((isSelf || allowed.length === 0) && el) {
+        let self = !dragCopy && isSelfDrop(desc, t);
+        let allowed = self ? [] : allowedZones(dragState!, { targetType: t.type, connId: t.connId, groupId: t.groupId });
+        while ((self || allowed.length === 0) && el) {
           el = parentDndRow(el);
+          walkedUp = true;
           t = el && descriptorFromDataset(el);
           if (!t) break;
-          isSelf =
-            !dragCopy &&
-            t.type === desc.type &&
-            t.id === desc.id &&
-            (t.type !== 'command' || t.terminalId === desc.terminalId) &&
-            (t.type !== 'group-terminal' || t.groupId === desc.groupId);
-          allowed = isSelf ? [] : allowedZones(dragState!, { targetType: t.type, connId: t.connId, groupId: t.groupId });
+          self = !dragCopy && isSelfDrop(desc, t);
+          allowed = self ? [] : allowedZones(dragState!, { targetType: t.type, connId: t.connId, groupId: t.groupId });
         }
       }
-      if (!t) {
+      if (!t || !el) {
         dropState = null;
         return;
       }
-      const isSelf =
-        !dragCopy &&
-        t.type === desc.type &&
-        t.id === desc.id &&
-        (t.type !== 'command' || t.terminalId === desc.terminalId) &&
-        (t.type !== 'group-terminal' || t.groupId === desc.groupId);
-      if (isSelf) {
+      if (!dragCopy && isSelfDrop(desc, t)) {
         dropState = null;
         return;
       }
@@ -456,9 +464,17 @@
         dropState = null;
         return;
       }
-      // The synthetic append zone has no real row to split into before/after —
-      // it always means "drop at end", so force `after`.
-      const zone = t.append ? 'after' : el ? pickZone(el.getBoundingClientRect(), ev.clientY, allowed) : null;
+      // Synthetic append zone always means "drop at end".
+      // Otherwise use the header bar rect; if we walked up from nested content
+      // (or the pointer is below the bar), treat sibling drops as `after`.
+      let zone: Zone | null;
+      if (t.append) {
+        zone = 'after';
+      } else {
+        const bar = dndBarRect(el);
+        const expandedBelow = walkedUp || ev.clientY > bar.bottom;
+        zone = pickZone(bar, ev.clientY, allowed, { expandedBelow });
+      }
       if (!zone) {
         dropState = null;
         return;
@@ -1225,11 +1241,8 @@
             >
               {#if activeZoneFor('connection', conn.id) === 'before'}<div class="absolute top-0 left-0 right-0 h-0.5 bg-sky-500 z-10 pointer-events-none"></div>{/if}
               {#if activeZoneFor('connection', conn.id) === 'after'}<div class="absolute bottom-0 left-0 right-0 h-0.5 bg-sky-500 z-10 pointer-events-none"></div>{/if}
-              <button class="w-full flex items-center justify-between px-2 py-1.5 rounded-lg text-xs font-semibold transition-colors hover:bg-white/5 group" onpointerdown={onRowPointerDown} onclick={(e) => onRowClick(e, () => toggleConnectionCollapse(conn.id))}>
+              <button data-dnd-bar class="w-full flex items-center justify-between px-2 py-1.5 rounded-lg text-xs font-semibold transition-colors hover:bg-white/5 group" onpointerdown={onRowPointerDown} onclick={(e) => onRowClick(e, () => toggleConnectionCollapse(conn.id))}>
                 <div class="flex items-center gap-2 overflow-hidden">
-                  <div class="cursor-grab active:cursor-grabbing p-0.5 text-slate-600 hover:text-slate-400 opacity-0 group-hover:opacity-100 transition-opacity" data-tooltip="Drag to reorder connection" data-tooltip-pos="bottom-right">
-                    <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="5" r="1"/><circle cx="9" cy="12" r="1"/><circle cx="9" cy="19" r="1"/><circle cx="15" cy="5" r="1"/><circle cx="15" cy="12" r="1"/><circle cx="15" cy="19" r="1"/></svg>
-                  </div>
                   <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0 text-sky-400 transition-transform {conn.collapsed ? '-rotate-90' : ''}" data-tooltip={conn.collapsed ? 'Expand connection' : 'Collapse connection'} data-tooltip-pos="bottom-right"><polyline points="6 9 12 15 18 9"/></svg>
                   <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0 text-sky-400" data-tooltip="Server connection" data-tooltip-pos="bottom-right"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
                   <span
@@ -1273,11 +1286,8 @@
                     >
                       {#if activeZoneFor('project', project.id) === 'before'}<div class="absolute top-0 left-0 right-0 h-0.5 bg-amber-500 z-10 pointer-events-none"></div>{/if}
                       {#if activeZoneFor('project', project.id) === 'after'}<div class="absolute bottom-0 left-0 right-0 h-0.5 bg-amber-500 z-10 pointer-events-none"></div>{/if}
-                      <button class="w-full flex items-center justify-between px-2 py-1 rounded-md text-xs transition-colors hover:bg-white/5 group" onpointerdown={onRowPointerDown} onclick={(e) => onRowClick(e, () => toggleProjectCollapse(connId, project.id))}>
+                      <button data-dnd-bar class="w-full flex items-center justify-between px-2 py-1 rounded-md text-xs transition-colors hover:bg-white/5 group" onpointerdown={onRowPointerDown} onclick={(e) => onRowClick(e, () => toggleProjectCollapse(connId, project.id))}>
                         <div class="flex items-center gap-2 overflow-hidden">
-                          <div class="cursor-grab active:cursor-grabbing p-0.5 text-slate-600 hover:text-slate-400 opacity-0 group-hover:opacity-100 transition-opacity" data-tooltip="Drag to reorder project" data-tooltip-pos="bottom-right">
-                            <svg xmlns="http://www.w3.org/2000/svg" width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="5" r="1"/><circle cx="9" cy="12" r="1"/><circle cx="9" cy="19" r="1"/><circle cx="15" cy="5" r="1"/><circle cx="15" cy="12" r="1"/><circle cx="15" cy="19" r="1"/></svg>
-                          </div>
                           <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0 text-amber-400 transition-transform {project.collapsed ? '-rotate-90' : ''}" data-tooltip={project.collapsed ? 'Expand project' : 'Collapse project'} data-tooltip-pos="bottom-right"><polyline points="6 9 12 15 18 9"/></svg>
                           <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0 text-amber-400" data-tooltip="Project workspace" data-tooltip-pos="bottom-right"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
                           <span
@@ -1326,14 +1336,12 @@
                               {#if activeZoneFor('terminal', terminal.id) === 'before'}<div class="absolute top-0 left-0 right-0 h-0.5 bg-sky-400 z-10 pointer-events-none"></div>{/if}
                               {#if activeZoneFor('terminal', terminal.id) === 'after'}<div class="absolute bottom-0 left-0 right-0 h-0.5 bg-sky-400 z-10 pointer-events-none"></div>{/if}
                               <button
+                                data-dnd-bar
                                 class="w-full flex items-center justify-between px-2 py-1 rounded-md text-xs transition-all group {activeTerminalId === terminal.id ? 'bg-sky-500/10 text-sky-400 ring-1 ring-sky-500/30' : 'text-slate-400 hover:bg-white/5 hover:text-slate-200'}"
                                 onpointerdown={onRowPointerDown}
                                 onclick={(e) => onRowClick(e, () => handleSelectTerminal(terminal.id))}
                               >
                                 <div class="flex items-center gap-1.5 overflow-hidden">
-                                  <div class="cursor-grab active:cursor-grabbing p-0.5 text-slate-600 hover:text-slate-400 opacity-0 group-hover:opacity-100 transition-opacity" data-tooltip="Drag to reorder terminal" data-tooltip-pos="bottom-right">
-                                    <svg xmlns="http://www.w3.org/2000/svg" width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="5" r="1"/><circle cx="9" cy="12" r="1"/><circle cx="9" cy="19" r="1"/><circle cx="15" cy="5" r="1"/><circle cx="15" cy="12" r="1"/><circle cx="15" cy="19" r="1"/></svg>
-                                  </div>
                                   <!-- Expand arrow for saved commands -->
                                   <div
                                     role="button" tabindex="0" data-no-drag data-tooltip="Saved command shortcuts" data-tooltip-pos="bottom-left"
@@ -1423,9 +1431,6 @@
                                         >
                                           {#if activeZoneFor('command', cmd.id) === 'before'}<div class="absolute top-0 left-0 right-0 h-0.5 bg-emerald-500 z-10 pointer-events-none"></div>{/if}
                                           {#if activeZoneFor('command', cmd.id) === 'after'}<div class="absolute bottom-0 left-0 right-0 h-0.5 bg-emerald-500 z-10 pointer-events-none"></div>{/if}
-                                          <div class="cursor-grab active:cursor-grabbing p-0.5 text-slate-700 hover:text-slate-500 opacity-0 group-hover/cmd:opacity-100 transition-opacity" data-tooltip="Drag to reorder or move command to another terminal" data-tooltip-pos="bottom-right">
-                                            <svg xmlns="http://www.w3.org/2000/svg" width="7" height="7" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="5" r="1"/><circle cx="9" cy="12" r="1"/><circle cx="9" cy="19" r="1"/><circle cx="15" cy="5" r="1"/><circle cx="15" cy="12" r="1"/><circle cx="15" cy="19" r="1"/></svg>
-                                          </div>
                                           {#if showCommandActionIcons}
                                             <!-- On-connect toggle -->
                                             <button
@@ -1524,11 +1529,8 @@
                       >
                         {#if activeZoneFor('project-group', group.id) === 'before'}<div class="absolute top-0 left-0 right-0 h-0.5 bg-violet-500 z-10 pointer-events-none"></div>{/if}
                         {#if activeZoneFor('project-group', group.id) === 'after'}<div class="absolute bottom-0 left-0 right-0 h-0.5 bg-violet-500 z-10 pointer-events-none"></div>{/if}
-                        <button class="w-full flex items-center justify-between px-2 py-1.5 rounded-md text-xs transition-colors hover:bg-white/5 group/pg" onpointerdown={onRowPointerDown} onclick={(e) => onRowClick(e, () => toggleProjectGroupCollapse(conn.id, group.id))}>
+                        <button data-dnd-bar class="w-full flex items-center justify-between px-2 py-1.5 rounded-md text-xs transition-colors hover:bg-white/5 group/pg" onpointerdown={onRowPointerDown} onclick={(e) => onRowClick(e, () => toggleProjectGroupCollapse(conn.id, group.id))}>
                           <div class="flex items-center gap-2 overflow-hidden">
-                            <div class="cursor-grab active:cursor-grabbing p-0.5 text-slate-600 hover:text-slate-400 opacity-0 group-hover/pg:opacity-100 transition-opacity" data-tooltip="Drag to reorder project group" data-tooltip-pos="bottom-right">
-                              <svg xmlns="http://www.w3.org/2000/svg" width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="5" r="1"/><circle cx="9" cy="12" r="1"/><circle cx="9" cy="19" r="1"/><circle cx="15" cy="5" r="1"/><circle cx="15" cy="12" r="1"/><circle cx="15" cy="19" r="1"/></svg>
-                            </div>
                             <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0 text-violet-400 transition-transform {group.collapsed ? '-rotate-90' : ''}" data-tooltip={group.collapsed ? 'Expand project group' : 'Collapse project group'} data-tooltip-pos="bottom-right"><polyline points="6 9 12 15 18 9"/></svg>
                             <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0 text-violet-400" data-tooltip="Project group" data-tooltip-pos="bottom-right"><path d="M15.5 17.5H22a2 2 0 0 0 2-2v-8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L11.6 3.4a2 2 0 0 0-1.67-.9H4a2 2 0 0 0-2 2v12.5a2 2 0 0 0 2 2h1.5"/><path d="M5 17.5v3A2 2 0 0 0 7 22.5h15a2 2 0 0 0 2-2v-3"/></svg>
                             <span
@@ -1591,11 +1593,8 @@
             >
               {#if activeZoneFor('group', group.id) === 'before'}<div class="absolute top-0 left-0 right-0 h-0.5 bg-indigo-500 z-10 pointer-events-none"></div>{/if}
               {#if activeZoneFor('group', group.id) === 'after'}<div class="absolute bottom-0 left-0 right-0 h-0.5 bg-indigo-500 z-10 pointer-events-none"></div>{/if}
-              <button class="w-full flex items-center justify-between px-2 py-1.5 rounded-lg text-xs font-semibold transition-colors hover:bg-white/5 group" onpointerdown={onRowPointerDown} onclick={(e) => onRowClick(e, () => toggleGroupCollapse(group.id))}>
+              <button data-dnd-bar class="w-full flex items-center justify-between px-2 py-1.5 rounded-lg text-xs font-semibold transition-colors hover:bg-white/5 group" onpointerdown={onRowPointerDown} onclick={(e) => onRowClick(e, () => toggleGroupCollapse(group.id))}>
                 <div class="flex items-center gap-2 overflow-hidden">
-                  <div class="cursor-grab active:cursor-grabbing p-0.5 text-slate-600 hover:text-slate-400 opacity-0 group-hover:opacity-100 transition-opacity" data-tooltip="Drag to reorder group" data-tooltip-pos="bottom-right">
-                    <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="5" r="1"/><circle cx="9" cy="12" r="1"/><circle cx="9" cy="19" r="1"/><circle cx="15" cy="5" r="1"/><circle cx="15" cy="12" r="1"/><circle cx="15" cy="19" r="1"/></svg>
-                  </div>
                   <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0 text-indigo-400 transition-transform {group.collapsed ? '-rotate-90' : ''}" data-tooltip={group.collapsed ? 'Expand group' : 'Collapse group'} data-tooltip-pos="bottom-right"><polyline points="6 9 12 15 18 9"/></svg>
                   <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0 text-indigo-400" data-tooltip="Custom terminal group" data-tooltip-pos="bottom-right"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
                   <span
@@ -1643,13 +1642,11 @@
                           {#if activeZoneFor('group-terminal', terminal.id) === 'before'}<div class="absolute top-0 left-0 right-0 h-0.5 bg-indigo-400 z-10 pointer-events-none"></div>{/if}
                           {#if activeZoneFor('group-terminal', terminal.id) === 'after'}<div class="absolute bottom-0 left-0 right-0 h-0.5 bg-indigo-400 z-10 pointer-events-none"></div>{/if}
                           <button
+                            data-dnd-bar
                             class="w-full flex items-center justify-between px-2 py-1 rounded-md text-xs transition-all group {activeTerminalId === terminal.id ? 'bg-sky-500/10 text-sky-400 ring-1 ring-sky-500/30' : 'text-slate-400 hover:bg-white/5 hover:text-slate-200'}"
                             onclick={() => handleSelectTerminal(terminal.id)}
                           >
                             <div class="flex items-center gap-1.5 overflow-hidden">
-                              <div class="cursor-grab active:cursor-grabbing p-0.5 text-slate-600 hover:text-slate-400 opacity-0 group-hover:opacity-100 transition-opacity" data-tooltip="Drag to reorder terminal in group" data-tooltip-pos="bottom-right">
-                                <svg xmlns="http://www.w3.org/2000/svg" width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="5" r="1"/><circle cx="9" cy="12" r="1"/><circle cx="9" cy="19" r="1"/><circle cx="15" cy="5" r="1"/><circle cx="15" cy="12" r="1"/><circle cx="15" cy="19" r="1"/></svg>
-                              </div>
                               <div class={`w-1.5 h-1.5 rounded-full shrink-0 ${!isMounted ? 'bg-slate-600' : (isConn ? 'bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.5)]' : 'bg-rose-500 shadow-[0_0_6px_rgba(244,63,94,0.5)]')}`} data-tooltip={!isMounted ? 'Not initialized' : (isConn ? 'Connected' : 'Disconnected')} data-tooltip-pos="bottom-right"></div>
                               <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0" data-tooltip="Terminal session" data-tooltip-pos="bottom-right"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
                               <span class="truncate">{terminal.name}</span>
