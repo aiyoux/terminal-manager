@@ -820,15 +820,17 @@ export function isLoaded(): boolean {
 }
 
 // Group Operations
-export function addTerminalGroup(name: string) {
-  terminalGroups.push({
+export function addTerminalGroup(name: string): TerminalGroup {
+  const group: TerminalGroup = {
     id: uid(),
     name,
     terminalIds: [],
     collapsed: false,
     variables: {},
-  });
+  };
+  terminalGroups.push(group);
   saveGroups();
+  return group;
 }
 
 export function removeTerminalGroup(groupId: string) {

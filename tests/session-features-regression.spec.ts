@@ -477,17 +477,15 @@ test.describe('Session features regression', () => {
     expect(after).toBe(!before);
   });
 
-  test('UI: sidebar tabs are routes and survive refresh', async ({ page }) => {
-    await page.getByRole('link', { name: 'Groups' }).click();
-    await expect(page).toHaveURL(/\/groups\/?$/);
-    await page.reload();
-    await expect(page).toHaveURL(/\/groups\/?$/);
-    await expect(page.getByRole('link', { name: 'Groups' })).toHaveAttribute('aria-current', 'page');
-
+  test('UI: header tabs are routes and survive refresh', async ({ page }) => {
     await page.getByRole('link', { name: 'Pinned' }).click();
     await expect(page).toHaveURL(/\/pinned\/?$/);
     await page.reload();
     await expect(page).toHaveURL(/\/pinned\/?$/);
+    await expect(page.getByRole('link', { name: 'Pinned' })).toHaveAttribute('aria-current', 'page');
+
+    await page.getByRole('link', { name: 'Connections' }).click();
+    await expect(page).toHaveURL(/\/connections\/?$/);
 
     await page.goto('/');
     await expect(page).toHaveURL(/\/connections\/?$/);

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { untrack } from 'svelte';
+  import { goto } from '$app/navigation';
   import { page } from '$app/state';
   import Terminal from '$lib/components/Terminal.svelte';
   import VariablesEditor from '$lib/components/VariablesEditor.svelte';
@@ -109,14 +110,47 @@
   let profileEpoch = $derived(getProfileEpoch());
   let profileMenuOpen = $state(false);
 
-  type SidebarTab = 'connections' | 'groups' | 'pinned';
+  /**
+   * Route keys persist independently so switching tabs does not remount terminals.
+   * - connections | pinned | group:<id>
+   * Using group id in the URL (/groups/[id]) is correct: stable across renames.
+   */
+  type RouteKey = string;
+  type NavKind = 'connections' | 'group' | 'pinned';
 
-  /** Driven by the URL so refresh keeps the active sidebar tab. */
-  let activeSidebarTab = $derived.by((): SidebarTab => {
-    const path = page.url.pathname;
-    if (path === '/groups' || path.startsWith('/groups/')) return 'groups';
+  function routeKeyFromPath(path: string): RouteKey {
     if (path === '/pinned' || path.startsWith('/pinned/')) return 'pinned';
+    const gm = path.match(/^\/groups\/([^/]+)/);
+    if (gm) return `group:${decodeURIComponent(gm[1])}`;
     return 'connections';
+  }
+
+  let activeRouteKey = $derived(routeKeyFromPath(page.url.pathname));
+  let navKind = $derived.by((): NavKind => {
+    if (activeRouteKey === 'pinned') return 'pinned';
+    if (activeRouteKey.startsWith('group:')) return 'group';
+    return 'connections';
+  });
+  let activeGroupId = $derived(
+    activeRouteKey.startsWith('group:') ? activeRouteKey.slice('group:'.length) : ''
+  );
+  let activeGroup = $derived(terminalGroups.find((g) => g.id === activeGroupId) ?? null);
+
+  // Legacy /groups → first group (or connections if none)
+  $effect(() => {
+    const path = page.url.pathname;
+    if (path !== '/groups' && path !== '/groups/') return;
+    const first = terminalGroups[0];
+    if (first) void goto(`/groups/${first.id}`, { replaceState: true });
+    else void goto('/connections', { replaceState: true });
+  });
+
+  // If the open group was deleted, leave the route
+  $effect(() => {
+    if (navKind !== 'group' || !activeGroupId) return;
+    if (!terminalGroups.some((g) => g.id === activeGroupId)) {
+      void goto('/connections', { replaceState: true });
+    }
   });
 
   // --- Sidebar view settings ---
@@ -681,19 +715,33 @@
   // Once mounted, terminals stay mounted across tab switches (only hidden via CSS).
   let mountedTerminalIds = $state<Set<string>>(new Set());
 
-  /** Per-tab workspace snapshot so Connections / Groups / Pinned each restore
-   *  their own selection + grid mode when you come back. */
+  /** Per-route workspace snapshot (connections / each group / pinned). */
   type TabWorkspace = {
     activeTerminalId: string;
     gridViewConnId: string;
     gridViewProjectId: string;
   };
-  let tabWorkspace: Record<SidebarTab, TabWorkspace> = {
+  let tabWorkspace: Record<string, TabWorkspace> = {
     connections: { activeTerminalId: '', gridViewConnId: '', gridViewProjectId: '' },
-    groups: { activeTerminalId: '', gridViewConnId: '', gridViewProjectId: '' },
     pinned: { activeTerminalId: '', gridViewConnId: '__pinned__', gridViewProjectId: '__pinned__' },
   };
-  let prevSidebarTab: SidebarTab | null = null;
+  let prevRouteKey: RouteKey | null = null;
+
+  function defaultWorkspaceFor(key: RouteKey): TabWorkspace {
+    if (key === 'pinned') {
+      return { activeTerminalId: '', gridViewConnId: '__pinned__', gridViewProjectId: '__pinned__' };
+    }
+    if (key.startsWith('group:')) {
+      const id = key.slice('group:'.length);
+      return { activeTerminalId: '', gridViewConnId: 'group', gridViewProjectId: id };
+    }
+    return { activeTerminalId: '', gridViewConnId: '', gridViewProjectId: '' };
+  }
+
+  function workspaceFor(key: RouteKey): TabWorkspace {
+    if (!tabWorkspace[key]) tabWorkspace[key] = defaultWorkspaceFor(key);
+    return tabWorkspace[key];
+  }
 
   function ensureMounted(ids: Iterable<string>) {
     let changed = false;
@@ -706,13 +754,23 @@
     if (changed) mountedTerminalIds = new Set(mountedTerminalIds);
   }
 
-  function applyTabWorkspace(tab: SidebarTab, ws: TabWorkspace) {
+  function applyTabWorkspace(key: RouteKey, ws: TabWorkspace) {
+    // Group routes always open that group's multi-terminal grid.
+    if (key.startsWith('group:')) {
+      const id = key.slice('group:'.length);
+      gridViewConnId = 'group';
+      gridViewProjectId = id;
+      setActiveTerminalId('');
+      const group = terminalGroups.find((g) => g.id === id);
+      if (group) ensureMounted(group.terminalIds);
+      return;
+    }
+
     gridViewConnId = ws.gridViewConnId;
     gridViewProjectId = ws.gridViewProjectId;
     setActiveTerminalId(ws.activeTerminalId);
 
-    if (tab === 'pinned') {
-      // Pinned tab defaults to the pinned multi-terminal grid.
+    if (key === 'pinned') {
       if (!gridViewProjectId) {
         gridViewConnId = '__pinned__';
         gridViewProjectId = '__pinned__';
@@ -721,7 +779,6 @@
       return;
     }
 
-    // Restore any terminals that belong to the saved single/grid view.
     if (ws.activeTerminalId) ensureMounted([ws.activeTerminalId]);
     if (ws.gridViewProjectId && ws.gridViewConnId === 'group') {
       const group = terminalGroups.find((g) => g.id === ws.gridViewProjectId);
@@ -779,27 +836,30 @@
   });
   let pinnedTerminals = $derived(allTerminals.filter(t => t.pinned));
 
-  // Save/restore workspace when the sidebar route changes. untrack so grid /
-  // active-terminal writes don't re-enter the effect.
+  // Save/restore workspace when the route changes. Terminals stay mounted.
   $effect(() => {
-    const tab = activeSidebarTab;
+    const key = activeRouteKey;
     untrack(() => {
-      if (prevSidebarTab === tab) return;
+      if (prevRouteKey === key) return;
 
-      if (prevSidebarTab !== null) {
-        tabWorkspace[prevSidebarTab] = {
+      if (prevRouteKey !== null) {
+        tabWorkspace[prevRouteKey] = {
           activeTerminalId,
           gridViewConnId,
           gridViewProjectId,
         };
       }
 
-      applyTabWorkspace(tab, tabWorkspace[tab]);
-      if (tab === 'pinned') {
-        ensureMounted(pinnedTerminals.map((t) => t.id));
-      }
-      prevSidebarTab = tab;
+      applyTabWorkspace(key, workspaceFor(key));
+      prevRouteKey = key;
     });
+  });
+
+  // Keep group grid terminals mounted while that group route is open
+  $effect(() => {
+    if (navKind === 'group' && activeGroup) {
+      ensureMounted(activeGroup.terminalIds);
+    }
   });
 
   // Auto-mount terminal when it becomes active (never unmount on tab switch)
@@ -1009,13 +1069,12 @@
     mountedTerminalIds = new Set();
     gridViewConnId = '';
     gridViewProjectId = '';
-    // Reset per-tab workspace memory for this UI session
+    // Reset per-route workspace memory for this UI session
     tabWorkspace = {
       connections: { activeTerminalId: '', gridViewConnId: '', gridViewProjectId: '' },
-      groups: { activeTerminalId: '', gridViewConnId: '', gridViewProjectId: '' },
       pinned: { activeTerminalId: '', gridViewConnId: '__pinned__', gridViewProjectId: '__pinned__' },
     };
-    prevSidebarTab = null;
+    prevRouteKey = null;
     await switchProfile(id);
   }
 
@@ -1048,10 +1107,9 @@
     gridViewProjectId = '';
     tabWorkspace = {
       connections: { activeTerminalId: '', gridViewConnId: '', gridViewProjectId: '' },
-      groups: { activeTerminalId: '', gridViewConnId: '', gridViewProjectId: '' },
       pinned: { activeTerminalId: '', gridViewConnId: '__pinned__', gridViewProjectId: '__pinned__' },
     };
-    prevSidebarTab = null;
+    prevRouteKey = null;
     await deleteProfile(activeProfileId);
   }
 
@@ -1076,7 +1134,9 @@
 
   async function handleAddGroup() {
     const name = await showPrompt('Group name:', 'New Group');
-    if (name) addTerminalGroup(name);
+    if (!name) return;
+    const group = addTerminalGroup(name);
+    void goto(`/groups/${group.id}`);
   }
 
   async function handleRemoveGroup(groupId: string, e: Event) {
@@ -1351,9 +1411,34 @@
           <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
         {/if}
       </button>
-      <h1 class="text-lg font-bold tracking-tight bg-gradient-to-r from-white to-slate-400 bg-clip-text text-transparent">Terminal Dashboard</h1>
+      <!-- Main nav: Connections | each group | Pinned (replaces page title) -->
+      <nav class="flex items-center gap-0.5 min-w-0 overflow-x-auto no-scrollbar max-w-[min(52vw,36rem)]" aria-label="Main">
+        <a
+          href="/connections"
+          class="shrink-0 px-2.5 py-1.5 rounded-md text-xs font-semibold transition-colors {navKind === 'connections' ? 'bg-white/10 text-white' : 'text-slate-500 hover:text-slate-200 hover:bg-white/5'}"
+          aria-current={navKind === 'connections' ? 'page' : undefined}
+          data-tooltip="Connections and project workspaces"
+          data-tooltip-pos="bottom"
+        >Connections</a>
+        {#each terminalGroups as g (g.id)}
+          <a
+            href="/groups/{g.id}"
+            class="shrink-0 max-w-[9rem] truncate px-2.5 py-1.5 rounded-md text-xs font-semibold transition-colors {activeGroupId === g.id ? 'bg-indigo-500/20 text-indigo-200' : 'text-slate-500 hover:text-slate-200 hover:bg-white/5'}"
+            aria-current={activeGroupId === g.id ? 'page' : undefined}
+            data-tooltip="Group grid: {g.name}"
+            data-tooltip-pos="bottom"
+          >{g.name}</a>
+        {/each}
+        <a
+          href="/pinned"
+          class="shrink-0 px-2.5 py-1.5 rounded-md text-xs font-semibold transition-colors {navKind === 'pinned' ? 'bg-amber-500/15 text-amber-200' : 'text-slate-500 hover:text-slate-200 hover:bg-white/5'}"
+          aria-current={navKind === 'pinned' ? 'page' : undefined}
+          data-tooltip="Pinned terminals"
+          data-tooltip-pos="bottom"
+        >Pinned</a>
+      </nav>
       <!-- Profile switcher -->
-      <div class="relative ml-1">
+      <div class="relative ml-1 shrink-0">
         <button
           type="button"
           onclick={() => { profileMenuOpen = !profileMenuOpen; }}
@@ -1513,37 +1598,7 @@
         ? `opacity: ${sidebarOpen ? 1 : 0}`
         : `width: ${sidebarOpen ? sidebarWidth + 'px' : '0px'}; opacity: ${sidebarOpen ? 1 : 0}`}
     >
-      <div class="flex items-center border-b border-white/5 p-2 gap-1">
-        <a
-          href="/connections"
-          class="flex-1 py-1.5 text-center text-xs font-semibold rounded-md transition-colors {activeSidebarTab === 'connections' ? 'bg-white/10 text-white' : 'text-slate-500 hover:text-slate-300 hover:bg-white/5'}"
-          data-tooltip="View server connections and project workspaces"
-          data-tooltip-pos="bottom"
-          aria-current={activeSidebarTab === 'connections' ? 'page' : undefined}
-        >
-          Connections
-        </a>
-        <a
-          href="/groups"
-          class="flex-1 py-1.5 text-center text-xs font-semibold rounded-md transition-colors {activeSidebarTab === 'groups' ? 'bg-white/10 text-white' : 'text-slate-500 hover:text-slate-300 hover:bg-white/5'}"
-          data-tooltip="View custom multi-terminal layout groups"
-          data-tooltip-pos="bottom"
-          aria-current={activeSidebarTab === 'groups' ? 'page' : undefined}
-        >
-          Groups
-        </a>
-        <a
-          href="/pinned"
-          class="flex-1 py-1.5 text-center text-xs font-semibold rounded-md transition-colors {activeSidebarTab === 'pinned' ? 'bg-white/10 text-white' : 'text-slate-500 hover:text-slate-300 hover:bg-white/5'}"
-          data-tooltip="View pinned active terminals"
-          data-tooltip-pos="bottom"
-          aria-current={activeSidebarTab === 'pinned' ? 'page' : undefined}
-        >
-          Pinned
-        </a>
-      </div>
-
-      <!-- View settings (below tabs, above section labels) -->
+      <!-- View settings -->
       <div class="flex items-center justify-between gap-2 px-3 py-2 border-b border-white/5 bg-slate-950/80">
         <span class="text-[9px] font-bold uppercase tracking-widest text-slate-600">View</span>
         <button
@@ -1569,7 +1624,7 @@
       </div>
 
       <div class="p-3 flex-1 min-h-0 min-w-0 overflow-y-auto overflow-x-hidden">
-        {#if activeSidebarTab === 'connections'}
+        {#if navKind === 'connections'}
           <div class="text-[10px] font-bold uppercase tracking-widest text-slate-500 mb-3 px-2">Connections</div>
 
           {#each connections as conn, connIdx (conn.id)}
@@ -1925,88 +1980,71 @@
               {/if}
             </div>
           {/each}
-        {:else if activeSidebarTab === 'groups'}
-          <div class="text-[10px] font-bold uppercase tracking-widest text-slate-500 mb-3 px-2">Groups</div>
-          {#each terminalGroups as group, groupIdx (group.id)}
-            <div
-              class="relative mb-2"
-              data-dnd-row
-              data-dnd-type="group"
-              data-dnd-id={group.id}
-              data-dnd-index={groupIdx}
-              onpointerdown={(e) => onPointerDown(e, { type: 'group', id: group.id, index: groupIdx })}
-            >
-              <button data-dnd-bar class="tree-row relative w-full flex items-center px-2 py-1.5 rounded-lg text-xs font-semibold transition-colors hover:bg-white/5 group" onpointerdown={onRowPointerDown} onclick={(e) => onRowClick(e, () => toggleGroupCollapse(group.id))}>
-                <div class="tree-row-label gap-2">
-                  <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0 text-indigo-400 transition-transform {group.collapsed ? '-rotate-90' : ''}" data-tooltip={group.collapsed ? 'Expand group' : 'Collapse group'} data-tooltip-pos="bottom-right"><polyline points="6 9 12 15 18 9"/></svg>
-                  <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0 text-indigo-400" data-tooltip="Custom terminal group" data-tooltip-pos="bottom-right"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
-                  <span
-                    class="tree-row-name truncate text-slate-200 select-none cursor-pointer"
-                    title="Click to expand/collapse"
-                  >{group.name}</span>
-                </div>
-                <div class="tree-row-actions" data-no-drag>
-                  <div role="button" tabindex="0" data-tooltip="Edit terminal group variables" data-tooltip-pos="bottom-left" onclick={(e) => openVariables({ kind: 'terminalGroup', terminalGroupId: group.id }, `Variables · ${group.name}`, e)} onkeydown={(e) => e.key === 'Enter' && openVariables({ kind: 'terminalGroup', terminalGroupId: group.id }, `Variables · ${group.name}`)} class="p-0.5 text-slate-500 hover:text-cyan-400 rounded hover:bg-cyan-500/20 transition-colors">
-                    <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9h16"/><path d="M4 15h16"/><path d="M10 3 8 21"/><path d="m16 3-2 18"/></svg>
-                  </div>
-                  <div role="button" tabindex="0" data-tooltip="Replace in commands" data-tooltip-pos="bottom-left" onclick={(e) => openTextReplace({ kind: 'terminalGroup', terminalGroupId: group.id }, e)} onkeydown={(e) => e.key === 'Enter' && openTextReplace({ kind: 'terminalGroup', terminalGroupId: group.id })} class="p-0.5 text-slate-500 hover:text-fuchsia-400 rounded hover:bg-fuchsia-500/20 transition-colors">
-                    <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m17 2 4 4-4 4"/><path d="M3 11h18"/><path d="m7 22-4-4 4-4"/><path d="M21 13H3"/></svg>
-                  </div>
-                  <div role="button" tabindex="0" data-tooltip={gridViewProjectId === group.id ? 'Switch to single view' : 'Switch to grid view'} data-tooltip-pos="bottom-left" onclick={(e) => toggleGridView('group', group.id, e)} onkeydown={(e) => e.key === 'Enter' && toggleGridView('group', group.id, e)} class="p-0.5 rounded transition-colors {gridViewProjectId === group.id ? 'text-violet-400 bg-violet-500/20' : 'text-slate-500 hover:text-violet-400 hover:bg-violet-500/20'}">
-                    <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
-                  </div>
-                  <div role="button" tabindex="0" data-tooltip="Remove custom group" data-tooltip-pos="bottom-left" onclick={(e) => handleRemoveGroup(group.id, e)} onkeydown={(e) => e.key === 'Enter' && handleRemoveGroup(group.id, e)} class="p-0.5 text-slate-500 hover:text-rose-400 rounded hover:bg-rose-500/20 transition-colors">
-                    <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-                  </div>
-                </div>
+        {:else if navKind === 'group'}
+          {#if activeGroup}
+            {@const group = activeGroup}
+            <div class="text-[10px] font-bold uppercase tracking-widest text-slate-500 mb-3 px-2 flex items-center justify-between gap-2">
+              <span class="truncate">{group.name}</span>
+              <button
+                type="button"
+                class="p-0.5 text-slate-500 hover:text-rose-400 rounded"
+                data-tooltip="Remove custom group"
+                data-tooltip-pos="bottom-left"
+                onclick={(e) => handleRemoveGroup(group.id, e)}
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
               </button>
-
-              {#if !group.collapsed}
-                <div class="ml-4 mt-1 border-l border-slate-800 pl-2 min-w-0">
-                  {#if group.terminalIds.length === 0}
-                    <p class="text-[10px] text-slate-600 italic px-2 py-1">No terminals in this group</p>
-                  {:else}
-                    {#each group.terminalIds as terminalId, termIdx (terminalId)}
-                      {@const terminal = allTerminals.find(t => t.id === terminalId)}
-                      {@const isMounted = mountedTerminalIds.has(terminalId)}
-                      {@const isConn = !!connectionStatuses[terminalId]}
-                      {#if terminal}
-                        <!-- Group Terminal row -->
-                        <div
-                          class="relative mb-0.5"
-                          data-dnd-row
-                          data-dnd-type="group-terminal"
-                          data-dnd-id={terminal.id}
-                          data-dnd-index={termIdx}
-                          data-dnd-terminal={terminal.id}
-                          data-dnd-group={group.id}
-                          onpointerdown={(e) => onPointerDown(e, { type: 'group-terminal', id: terminal.id, index: termIdx, terminalId: terminal.id, groupId: group.id })}
-                        >
-                          <button
-                            data-dnd-bar
-                            class="tree-row relative w-full flex items-center px-2 py-1 rounded-md text-xs transition-all group {activeTerminalId === terminal.id ? 'bg-sky-500/10 text-sky-400 ring-1 ring-sky-500/30' : 'text-slate-400 hover:bg-white/5 hover:text-slate-200'}"
-                            onclick={() => handleSelectTerminal(terminal.id)}
-                          >
-                            <div class="tree-row-label gap-1.5">
-                              <div class={`w-1.5 h-1.5 rounded-full shrink-0 ${!isMounted ? 'bg-slate-600' : (isConn ? 'bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.5)]' : 'bg-rose-500 shadow-[0_0_6px_rgba(244,63,94,0.5)]')}`} data-tooltip={!isMounted ? 'Not initialized' : (isConn ? 'Connected' : 'Disconnected')} data-tooltip-pos="bottom-right"></div>
-                              <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0" data-tooltip="Terminal session" data-tooltip-pos="bottom-right"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
-                              <span class="tree-row-name truncate text-left">{terminal.name}</span>
-                            </div>
-                            <div class="tree-row-actions tree-row-actions-tight" data-no-drag>
-                              <div role="button" tabindex="0" data-tooltip="Remove terminal from group" data-tooltip-pos="bottom-left" onclick={(e) => handleRemoveTerminalFromGroup(group.id, terminal.id, e)} onkeydown={(e) => e.key === 'Enter' && handleRemoveTerminalFromGroup(group.id, terminal.id, e)} class="p-0.5 text-slate-500 hover:text-rose-400 rounded hover:bg-rose-500/20 transition-colors">
-                                <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-                              </div>
-                            </div>
-                          </button>
-                        </div>
-                      {/if}
-                    {/each}
-                  {/if}
-                </div>
-              {/if}
             </div>
-          {/each}
-        {:else if activeSidebarTab === 'pinned'}
+            <div class="flex items-center gap-1 px-2 mb-2">
+              <div role="button" tabindex="0" data-tooltip="Edit terminal group variables" data-tooltip-pos="bottom-left" onclick={(e) => openVariables({ kind: 'terminalGroup', terminalGroupId: group.id }, `Variables · ${group.name}`, e)} onkeydown={(e) => e.key === 'Enter' && openVariables({ kind: 'terminalGroup', terminalGroupId: group.id }, `Variables · ${group.name}`)} class="p-1 text-slate-500 hover:text-cyan-400 rounded hover:bg-cyan-500/20 transition-colors">
+                <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9h16"/><path d="M4 15h16"/><path d="M10 3 8 21"/><path d="m16 3-2 18"/></svg>
+              </div>
+              <div role="button" tabindex="0" data-tooltip="Replace in commands" data-tooltip-pos="bottom-left" onclick={(e) => openTextReplace({ kind: 'terminalGroup', terminalGroupId: group.id }, e)} onkeydown={(e) => e.key === 'Enter' && openTextReplace({ kind: 'terminalGroup', terminalGroupId: group.id })} class="p-1 text-slate-500 hover:text-fuchsia-400 rounded hover:bg-fuchsia-500/20 transition-colors">
+                <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m17 2 4 4-4 4"/><path d="M3 11h18"/><path d="m7 22-4-4 4-4"/><path d="M21 13H3"/></svg>
+              </div>
+            </div>
+            {#if group.terminalIds.length === 0}
+              <p class="text-[10px] text-slate-600 italic px-2 py-1">No terminals in this group</p>
+            {:else}
+              {#each group.terminalIds as terminalId, termIdx (terminalId)}
+                {@const terminal = allTerminals.find(t => t.id === terminalId)}
+                {@const isMounted = mountedTerminalIds.has(terminalId)}
+                {@const isConn = !!connectionStatuses[terminalId]}
+                {#if terminal}
+                  <div
+                    class="relative mb-0.5"
+                    data-dnd-row
+                    data-dnd-type="group-terminal"
+                    data-dnd-id={terminal.id}
+                    data-dnd-index={termIdx}
+                    data-dnd-terminal={terminal.id}
+                    data-dnd-group={group.id}
+                    onpointerdown={(e) => onPointerDown(e, { type: 'group-terminal', id: terminal.id, index: termIdx, terminalId: terminal.id, groupId: group.id })}
+                  >
+                    <button
+                      data-dnd-bar
+                      class="tree-row relative w-full flex items-center px-2 py-1 rounded-md text-xs transition-all group {activeTerminalId === terminal.id ? 'bg-sky-500/10 text-sky-400 ring-1 ring-sky-500/30' : 'text-slate-400 hover:bg-white/5 hover:text-slate-200'}"
+                      onclick={() => handleSelectTerminal(terminal.id)}
+                    >
+                      <div class="tree-row-label gap-1.5">
+                        <div class={`w-1.5 h-1.5 rounded-full shrink-0 ${!isMounted ? 'bg-slate-600' : (isConn ? 'bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.5)]' : 'bg-rose-500 shadow-[0_0_6px_rgba(244,63,94,0.5)]')}`} data-tooltip={!isMounted ? 'Not initialized' : (isConn ? 'Connected' : 'Disconnected')} data-tooltip-pos="bottom-right"></div>
+                        <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0" data-tooltip="Terminal session" data-tooltip-pos="bottom-right"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+                        <span class="tree-row-name truncate text-left">{terminal.name}</span>
+                      </div>
+                      <div class="tree-row-actions tree-row-actions-tight" data-no-drag>
+                        <div role="button" tabindex="0" data-tooltip="Remove terminal from group" data-tooltip-pos="bottom-left" onclick={(e) => handleRemoveTerminalFromGroup(group.id, terminal.id, e)} onkeydown={(e) => e.key === 'Enter' && handleRemoveTerminalFromGroup(group.id, terminal.id, e)} class="p-0.5 text-slate-500 hover:text-rose-400 rounded hover:bg-rose-500/20 transition-colors">
+                          <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                        </div>
+                      </div>
+                    </button>
+                  </div>
+                {/if}
+              {/each}
+            {/if}
+          {:else}
+            <p class="text-[10px] text-slate-600 italic px-2 py-4 text-center">Group not found.</p>
+          {/if}
+        {:else if navKind === 'pinned'}
           <div class="text-[10px] font-bold uppercase tracking-widest text-slate-500 mb-3 px-2">Pinned Terminals</div>
           {#if pinnedTerminals.length === 0}
             <p class="text-[10px] text-slate-600 italic px-2 py-4 text-center">No pinned terminals yet. Pin terminals using the pin button in the terminal header.</p>
@@ -2038,12 +2076,12 @@
       </div>
 
       <div class="p-3 border-t border-white/5">
-        {#if activeSidebarTab === 'connections'}
+        {#if navKind === 'connections'}
           <button onclick={handleAddConnection} data-tooltip="Add a new server connection" data-tooltip-pos="top" class="w-full py-2 border border-slate-700 border-dashed rounded-lg text-slate-400 hover:text-white hover:border-slate-500 hover:bg-white/5 transition-all text-xs flex items-center justify-center gap-2">
             <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
             Add Connection
           </button>
-        {:else if activeSidebarTab === 'groups'}
+        {:else if navKind === 'group'}
           <button onclick={handleAddGroup} data-tooltip="Add a new custom group layout" data-tooltip-pos="top" class="w-full py-2 border border-indigo-700/50 border-dashed rounded-lg text-indigo-400 hover:text-indigo-300 hover:border-indigo-500 hover:bg-indigo-500/10 transition-all text-xs flex items-center justify-center gap-2">
             <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
             Add Group
