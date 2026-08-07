@@ -16,9 +16,18 @@
     onClose,
   }: {
     scopeRef: VariableOwnerRef;
-    title?: string;
+    title: string;
     onClose: () => void;
   } = $props();
+
+  let backdropDown = false;
+  function onBackdropPointerDown(e: PointerEvent) {
+    backdropDown = e.target === e.currentTarget;
+  }
+  function onBackdropClick(e: MouseEvent) {
+    if (backdropDown && e.target === e.currentTarget) onClose();
+    backdropDown = false;
+  }
 
   let newKey = $state('');
   let newValue = $state('');
@@ -27,6 +36,9 @@
   let renameFrom = $state('');
   let renameTo = $state('');
   let tick = $state(0);
+
+  let editingKey = $state<string | null>(null);
+  let editingValue = $state('');
 
   let own = $derived.by(() => {
     tick;
@@ -62,6 +74,30 @@
     refresh();
   }
 
+  function handleEdit(key: string, currentValue: string) {
+    editingKey = key;
+    editingValue = currentValue;
+  }
+
+  function handleEditSave() {
+    if (!editingKey) return;
+    error = '';
+    notice = '';
+    const r = setVariable(scopeRef, editingKey, editingValue);
+    if (!r.ok) {
+      error = r.error;
+      return;
+    }
+    editingKey = null;
+    editingValue = '';
+    refresh();
+  }
+
+  function handleEditCancel() {
+    editingKey = null;
+    editingValue = '';
+  }
+
   function handleDelete(key: string) {
     error = '';
     notice = '';
@@ -93,7 +129,7 @@
   }
 </script>
 
-<div class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" role="dialog" aria-modal="true" aria-label={title}>
+<div class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" role="dialog" aria-modal="true" aria-label={title} onpointerdown={onBackdropPointerDown} onclick={onBackdropClick}>
   <div class="w-full max-w-lg max-h-[85vh] overflow-hidden flex flex-col rounded-xl border border-slate-700 bg-slate-900 shadow-2xl">
     <div class="flex items-center justify-between px-4 py-3 border-b border-slate-700">
       <div>
@@ -127,8 +163,20 @@
             <div class="flex items-center gap-2 rounded-md bg-slate-800/80 px-2 py-1.5">
               <code class="text-sky-300 font-mono shrink-0">{key}</code>
               <span class="text-slate-500">=</span>
-              <span class="text-slate-200 truncate flex-1 font-mono">{value}</span>
-              <button type="button" class="text-rose-400 hover:text-rose-300 shrink-0 text-[10px]" onclick={() => handleDelete(key)}>Delete</button>
+              {#if editingKey === key}
+                <input
+                  bind:value={editingValue}
+                  class="bg-slate-900 border border-sky-600 rounded px-2 py-0.5 text-slate-200 font-mono flex-1 min-w-0"
+                  data-no-drag
+                  onkeydown={(e) => { if (e.key === 'Enter') handleEditSave(); if (e.key === 'Escape') handleEditCancel(); }}
+                />
+                <button type="button" class="text-emerald-400 hover:text-emerald-300 shrink-0 text-[10px]" onclick={handleEditSave}>Save</button>
+                <button type="button" class="text-slate-400 hover:text-slate-200 shrink-0 text-[10px]" onclick={handleEditCancel}>Cancel</button>
+              {:else}
+                <span class="text-slate-200 truncate flex-1 font-mono">{value}</span>
+                <button type="button" class="text-sky-400 hover:text-sky-300 shrink-0 text-[10px]" onclick={() => handleEdit(key, value)}>Edit</button>
+                <button type="button" class="text-rose-400 hover:text-rose-300 shrink-0 text-[10px]" onclick={() => handleDelete(key)}>Delete</button>
+              {/if}
             </div>
           {:else}
             <p class="text-slate-600 italic">No own variables</p>

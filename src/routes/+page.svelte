@@ -369,6 +369,12 @@
     return document.elementFromPoint(x, y)?.closest<HTMLElement>('[data-dnd-row]') ?? null;
   }
 
+  /** Walk up from `el` to the nearest `[data-dnd-row]` ancestor (skipping
+   *  `el` itself). Returns null at the top of the tree. */
+  function parentDndRow(el: HTMLElement): HTMLElement | null {
+    return el.parentElement?.closest<HTMLElement>('[data-dnd-row]') ?? null;
+  }
+
   function descriptorFromDataset(el: HTMLElement): RowDescriptor | null {
     const ds = el.dataset;
     if (!ds.dndType || !ds.dndId) return null;
@@ -403,19 +409,45 @@
       }
       dragCopy = ev.shiftKey;
       dragCursorXY = { x: ev.clientX, y: ev.clientY };
-      const el = rowFromPoint(ev.clientX, ev.clientY);
-      const t = el && descriptorFromDataset(el);
-      // Can't drop on self — commands scoped by terminal, group-terminals by
-      // group (the same id can appear in more than one container). In copy
-      // mode, self-drop is allowed (creates a duplicate).
+
+      // Walk up from the innermost data-dnd-row to find a row that accepts a
+      // drop for the current drag type. Without this, dragging a terminal over
+      // its own expanded command rows would hit the command row (which has no
+      // allowed zones for a terminal drag) and the drop would silently fail.
+      let el = rowFromPoint(ev.clientX, ev.clientY);
+      let t = el && descriptorFromDataset(el);
+      if (t) {
+        let isSelf =
+          !dragCopy &&
+          t.type === desc.type &&
+          t.id === desc.id &&
+          (t.type !== 'command' || t.terminalId === desc.terminalId) &&
+          (t.type !== 'group-terminal' || t.groupId === desc.groupId);
+        let allowed = isSelf ? [] : allowedZones(dragState!, { targetType: t.type, connId: t.connId, groupId: t.groupId });
+        while ((isSelf || allowed.length === 0) && el) {
+          el = parentDndRow(el);
+          t = el && descriptorFromDataset(el);
+          if (!t) break;
+          isSelf =
+            !dragCopy &&
+            t.type === desc.type &&
+            t.id === desc.id &&
+            (t.type !== 'command' || t.terminalId === desc.terminalId) &&
+            (t.type !== 'group-terminal' || t.groupId === desc.groupId);
+          allowed = isSelf ? [] : allowedZones(dragState!, { targetType: t.type, connId: t.connId, groupId: t.groupId });
+        }
+      }
+      if (!t) {
+        dropState = null;
+        return;
+      }
       const isSelf =
         !dragCopy &&
-        t != null &&
         t.type === desc.type &&
         t.id === desc.id &&
         (t.type !== 'command' || t.terminalId === desc.terminalId) &&
         (t.type !== 'group-terminal' || t.groupId === desc.groupId);
-      if (!t || isSelf) {
+      if (isSelf) {
         dropState = null;
         return;
       }

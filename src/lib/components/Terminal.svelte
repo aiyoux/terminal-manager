@@ -39,11 +39,23 @@
     settingsOpen = !settingsOpen;
   }
 
+  let pointerDownInside = false;
+
   function handleWindowPointerDown(e: PointerEvent) {
     if (!settingsOpen) return;
     const target = e.target as Node | null;
     if (!target) return;
-    // Keep open when interacting inside the popover or gear button
+    const popover = document.getElementById(`cmd-settings-${terminalId}`);
+    pointerDownInside = !!(popover?.contains(target) || settingsBtnEl?.contains(target));
+  }
+
+  function handleWindowClick(e: MouseEvent) {
+    if (!settingsOpen) return;
+    const wasInside = pointerDownInside;
+    pointerDownInside = false;
+    if (wasInside) return;
+    const target = e.target as Node | null;
+    if (!target) return;
     const popover = document.getElementById(`cmd-settings-${terminalId}`);
     if (popover?.contains(target) || settingsBtnEl?.contains(target)) return;
     settingsOpen = false;
@@ -177,6 +189,7 @@
     resizeObserver.observe(terminalContainer);
 
     window.addEventListener('pointerdown', handleWindowPointerDown, true);
+    window.addEventListener('click', handleWindowClick, true);
     window.addEventListener('keydown', handleWindowKeydown);
   });
 
@@ -185,6 +198,7 @@
     if (term) term.dispose();
     if (resizeObserver) resizeObserver.disconnect();
     window.removeEventListener('pointerdown', handleWindowPointerDown, true);
+    window.removeEventListener('click', handleWindowClick, true);
     window.removeEventListener('keydown', handleWindowKeydown);
   });
 
