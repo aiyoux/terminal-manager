@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import { page } from '$app/state';
   import Terminal from '$lib/components/Terminal.svelte';
   import VariablesEditor from '$lib/components/VariablesEditor.svelte';
@@ -653,15 +654,66 @@
     window.addEventListener('mouseup', onMouseUp, { once: true });
   }
 
-  // Grid view state
+  // Grid view state (live workspace for the *current* sidebar tab)
   let gridViewConnId = $state<string>('');
   let gridViewProjectId = $state<string>('');
 
   // Global grid layout config
   let currentGridConfig = $derived(getGridSettings());
 
-  // Track which terminals are mounted
+  // Once mounted, terminals stay mounted across tab switches (only hidden via CSS).
   let mountedTerminalIds = $state<Set<string>>(new Set());
+
+  /** Per-tab workspace snapshot so Connections / Groups / Pinned each restore
+   *  their own selection + grid mode when you come back. */
+  type TabWorkspace = {
+    activeTerminalId: string;
+    gridViewConnId: string;
+    gridViewProjectId: string;
+  };
+  let tabWorkspace: Record<SidebarTab, TabWorkspace> = {
+    connections: { activeTerminalId: '', gridViewConnId: '', gridViewProjectId: '' },
+    groups: { activeTerminalId: '', gridViewConnId: '', gridViewProjectId: '' },
+    pinned: { activeTerminalId: '', gridViewConnId: '__pinned__', gridViewProjectId: '__pinned__' },
+  };
+  let prevSidebarTab: SidebarTab | null = null;
+
+  function ensureMounted(ids: Iterable<string>) {
+    let changed = false;
+    for (const id of ids) {
+      if (!mountedTerminalIds.has(id)) {
+        mountedTerminalIds.add(id);
+        changed = true;
+      }
+    }
+    if (changed) mountedTerminalIds = new Set(mountedTerminalIds);
+  }
+
+  function applyTabWorkspace(tab: SidebarTab, ws: TabWorkspace) {
+    gridViewConnId = ws.gridViewConnId;
+    gridViewProjectId = ws.gridViewProjectId;
+    setActiveTerminalId(ws.activeTerminalId);
+
+    if (tab === 'pinned') {
+      // Pinned tab defaults to the pinned multi-terminal grid.
+      if (!gridViewProjectId) {
+        gridViewConnId = '__pinned__';
+        gridViewProjectId = '__pinned__';
+      }
+      ensureMounted(pinnedTerminals.map((t) => t.id));
+      return;
+    }
+
+    // Restore any terminals that belong to the saved single/grid view.
+    if (ws.activeTerminalId) ensureMounted([ws.activeTerminalId]);
+    if (ws.gridViewProjectId && ws.gridViewConnId === 'group') {
+      const group = terminalGroups.find((g) => g.id === ws.gridViewProjectId);
+      if (group) ensureMounted(group.terminalIds);
+    } else if (ws.gridViewProjectId && ws.gridViewConnId && ws.gridViewConnId !== '__pinned__') {
+      const found = findProjectById(ws.gridViewProjectId);
+      if (found) ensureMounted(found.project.terminals.map((t) => t.id));
+    }
+  }
 
   // Flat list of all terminals with connection info
   let allTerminals = $derived.by(() => {
@@ -710,29 +762,30 @@
   });
   let pinnedTerminals = $derived(allTerminals.filter(t => t.pinned));
 
-  // Pinned route owns the pinned multi-terminal grid; leaving it clears that mode.
+  // Save/restore workspace when the sidebar route changes. untrack so grid /
+  // active-terminal writes don't re-enter the effect.
   $effect(() => {
-    if (activeSidebarTab === 'pinned') {
-      if (gridViewConnId !== '__pinned__') {
-        gridViewProjectId = '__pinned__';
-        gridViewConnId = '__pinned__';
-        setActiveTerminalId('');
+    const tab = activeSidebarTab;
+    untrack(() => {
+      if (prevSidebarTab === tab) return;
+
+      if (prevSidebarTab !== null) {
+        tabWorkspace[prevSidebarTab] = {
+          activeTerminalId,
+          gridViewConnId,
+          gridViewProjectId,
+        };
       }
-      let changed = false;
-      for (const t of pinnedTerminals) {
-        if (!mountedTerminalIds.has(t.id)) {
-          mountedTerminalIds.add(t.id);
-          changed = true;
-        }
+
+      applyTabWorkspace(tab, tabWorkspace[tab]);
+      if (tab === 'pinned') {
+        ensureMounted(pinnedTerminals.map((t) => t.id));
       }
-      if (changed) mountedTerminalIds = new Set(mountedTerminalIds);
-    } else if (gridViewConnId === '__pinned__') {
-      gridViewConnId = '';
-      gridViewProjectId = '';
-    }
+      prevSidebarTab = tab;
+    });
   });
 
-  // Auto-mount terminal when it becomes active
+  // Auto-mount terminal when it becomes active (never unmount on tab switch)
   $effect(() => {
     if (activeTerminalId && !mountedTerminalIds.has(activeTerminalId)) {
       mountedTerminalIds.add(activeTerminalId);
@@ -740,17 +793,10 @@
     }
   });
 
-  // Auto-mount pinned terminals when in pinned view
+  // Keep pinned terminals mounted while the pinned grid is showing
   $effect(() => {
     if (gridViewConnId === '__pinned__') {
-      let changed = false;
-      for (const t of pinnedTerminals) {
-        if (!mountedTerminalIds.has(t.id)) {
-          mountedTerminalIds.add(t.id);
-          changed = true;
-        }
-      }
-      if (changed) mountedTerminalIds = new Set(mountedTerminalIds);
+      ensureMounted(pinnedTerminals.map((t) => t.id));
     }
   });
 
