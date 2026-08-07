@@ -270,9 +270,9 @@
 </script>
 
 <div
-  class="flex flex-col h-full w-full bg-slate-900 relative group terminal-chrome
+  class="terminal-chrome flex flex-col h-full w-full bg-[#0f172a] relative group
     {dense
-      ? 'rounded-none border-0 border-r border-b border-slate-700 shadow-none'
+      ? 'terminal-dense rounded-none border-0 border-r border-b border-slate-700 shadow-none'
       : 'rounded-xl border border-slate-700/50 shadow-2xl'}"
 >
   <div class="flex items-center justify-between px-4 py-2 bg-slate-800 border-b border-slate-700 z-20 shrink-0 {dense ? 'rounded-none' : 'rounded-t-xl'}">
@@ -430,9 +430,13 @@
     </div>
   </div>
 
-  <div class="flex-1 min-h-0 overflow-hidden bg-[#0f172a] relative {dense ? 'p-0 rounded-none' : 'p-2 rounded-b-xl'}" style="contain: layout paint; isolation: isolate;">
+  <!-- No padding around xterm — body fills chrome edge-to-edge (esp. dense grid). -->
+  <div
+    class="terminal-body flex-1 min-h-0 overflow-hidden bg-[#0f172a] relative p-0 {dense ? 'rounded-none' : 'rounded-b-xl'}"
+    style="contain: layout paint; isolation: isolate;"
+  >
     <div
-      class="h-full w-full"
+      class="terminal-xterm-host absolute inset-0 overflow-hidden"
       bind:this={terminalContainer}
     ></div>
   </div>
@@ -445,5 +449,19 @@
   .no-scrollbar {
     -ms-overflow-style: none;
     scrollbar-width: none;
+  }
+
+  /* Flush xterm into the host — no internal gutter from the library defaults. */
+  .terminal-xterm-host :global(.xterm) {
+    height: 100%;
+    width: 100%;
+    padding: 0 !important;
+    margin: 0 !important;
+  }
+  .terminal-xterm-host :global(.xterm-viewport) {
+    overflow-y: auto;
+  }
+  .terminal-xterm-host :global(.xterm-screen) {
+    margin: 0 !important;
   }
 </style>
