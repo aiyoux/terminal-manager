@@ -14,7 +14,7 @@
   import { updateTerminalFontSize, resolveCommandForTerminal, type SavedCommand } from '$lib/stores.svelte';
   import CommandShortcutsPanel from './CommandShortcutsPanel.svelte';
 
-  let { wsUrl, title = "Terminal", tmuxSession = '', workingDir = '', terminalId = '', fontSize = 14, connId = '', projectId = '', savedCommands = [], pinned = false, dense = false, onAddToGroup, onTogglePin, onResolveError }: {
+  let { wsUrl, title = "Terminal", tmuxSession = '', workingDir = '', terminalId = '', fontSize = 14, connId = '', projectId = '', savedCommands = [], pinned = false, dense = true, gridCell = false, onAddToGroup, onTogglePin, onResolveError }: {
     wsUrl: string;
     title?: string;
     tmuxSession?: string;
@@ -25,8 +25,10 @@
     projectId?: string;
     savedCommands?: SavedCommand[];
     pinned?: boolean;
-    /** Grid layout: square corners, no outer shadow, borders that collapse with neighbors. */
+    /** Square corners, no card chrome, flush xterm (default for all views). */
     dense?: boolean;
+    /** In a multi-pane grid: only right/bottom borders so neighbors share a single line. */
+    gridCell?: boolean;
     onAddToGroup?: () => void;
     onTogglePin?: () => void;
     /** Called when variable resolution fails (fail-closed; no send). */
@@ -122,6 +124,10 @@
       cursorBlink: true,
       fontSize: fontSize,
       lineHeight: 1.2,
+      // FitAddon reserves overviewRuler.width (default 14px) on the right for a
+      // scrollbar gutter — that left a visible empty strip in each grid tile.
+      // Zero it and overlay the scrollbar so cols use the full host width.
+      overviewRuler: { width: 0 },
       theme: {
         background: '#0f172a', // Slate 900
         foreground: '#f1f5f9', // Slate 100
@@ -270,9 +276,9 @@
 </script>
 
 <div
-  class="terminal-chrome flex flex-col h-full w-full bg-[#0f172a] relative group
+  class="terminal-chrome flex flex-col h-full w-full bg-[#0f172a] relative group shadow-none
     {dense
-      ? 'terminal-dense rounded-none border-0 border-r border-b border-slate-700 shadow-none'
+      ? `terminal-dense rounded-none ${gridCell ? 'border-0 border-r border-b border-slate-700' : 'border-0'}`
       : 'rounded-xl border border-slate-700/50 shadow-2xl'}"
 >
   <div class="flex items-center justify-between px-4 py-2 bg-slate-800 border-b border-slate-700 z-20 shrink-0 {dense ? 'rounded-none' : 'rounded-t-xl'}">
@@ -453,13 +459,16 @@
 
   /* Flush xterm into the host — no internal gutter from the library defaults. */
   .terminal-xterm-host :global(.xterm) {
-    height: 100%;
-    width: 100%;
+    height: 100% !important;
+    width: 100% !important;
     padding: 0 !important;
     margin: 0 !important;
   }
   .terminal-xterm-host :global(.xterm-viewport) {
+    /* Overlay scrollbar so it does not reserve a permanent right gutter. */
     overflow-y: auto;
+    scrollbar-width: thin;
+    scrollbar-gutter: auto;
   }
   .terminal-xterm-host :global(.xterm-screen) {
     margin: 0 !important;
