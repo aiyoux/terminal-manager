@@ -14,7 +14,7 @@
   import { updateTerminalFontSize, resolveCommandForTerminal, type SavedCommand } from '$lib/stores.svelte';
   import CommandShortcutsPanel from './CommandShortcutsPanel.svelte';
 
-  let { wsUrl, title = "Terminal", tmuxSession = '', workingDir = '', terminalId = '', fontSize = 14, connId = '', projectId = '', savedCommands = [], pinned = false, onAddToGroup, onTogglePin, onResolveError }: {
+  let { wsUrl, title = "Terminal", tmuxSession = '', workingDir = '', terminalId = '', fontSize = 14, connId = '', projectId = '', savedCommands = [], pinned = false, dense = false, onAddToGroup, onTogglePin, onResolveError }: {
     wsUrl: string;
     title?: string;
     tmuxSession?: string;
@@ -25,6 +25,8 @@
     projectId?: string;
     savedCommands?: SavedCommand[];
     pinned?: boolean;
+    /** Grid layout: square corners, no outer shadow, borders that collapse with neighbors. */
+    dense?: boolean;
     onAddToGroup?: () => void;
     onTogglePin?: () => void;
     /** Called when variable resolution fails (fail-closed; no send). */
@@ -267,8 +269,13 @@
   }
 </script>
 
-<div class="flex flex-col h-full w-full bg-slate-900 rounded-xl border border-slate-700/50 shadow-2xl relative group">
-  <div class="flex items-center justify-between px-4 py-2 bg-slate-800 border-b border-slate-700 z-20 shrink-0 rounded-t-xl">
+<div
+  class="flex flex-col h-full w-full bg-slate-900 relative group terminal-chrome
+    {dense
+      ? 'rounded-none border-0 border-r border-b border-slate-700 shadow-none'
+      : 'rounded-xl border border-slate-700/50 shadow-2xl'}"
+>
+  <div class="flex items-center justify-between px-4 py-2 bg-slate-800 border-b border-slate-700 z-20 shrink-0 {dense ? 'rounded-none' : 'rounded-t-xl'}">
     <div class="flex items-center gap-2 min-w-0 mr-2">
       <div class={`w-2.5 h-2.5 rounded-full shrink-0 ${connected ? 'bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.6)]' : 'bg-rose-500'}`}></div>
       <span class="text-xs font-medium text-slate-300 tracking-wide select-none truncate shrink-0 max-w-[10rem]">{title}</span>
@@ -423,7 +430,7 @@
     </div>
   </div>
 
-  <div class="flex-1 p-2 min-h-0 overflow-hidden bg-[#0f172a] relative rounded-b-xl" style="contain: layout paint; isolation: isolate;">
+  <div class="flex-1 min-h-0 overflow-hidden bg-[#0f172a] relative {dense ? 'p-0 rounded-none' : 'p-2 rounded-b-xl'}" style="contain: layout paint; isolation: isolate;">
     <div
       class="h-full w-full"
       bind:this={terminalContainer}

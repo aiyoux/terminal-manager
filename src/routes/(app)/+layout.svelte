@@ -1883,7 +1883,7 @@
     <!-- Terminal Workspace -->
     <div
       bind:this={workspaceEl}
-      class="flex-1 min-w-0 bg-slate-900/30 p-3 relative"
+      class="flex-1 min-w-0 relative {gridViewProjectId ? 'bg-slate-950 p-0' : 'bg-slate-900/30 p-3'}"
       class:grid-mode={!!gridViewProjectId}
       class:overflow-hidden={!gridViewProjectId || !currentGridConfig.rows}
       class:overflow-y-auto={!!gridViewProjectId && !!currentGridConfig.rows}
@@ -1891,7 +1891,8 @@
       id="workspace"
       style={gridViewProjectId ? [
         currentGridConfig.columns ? `grid-template-columns: repeat(${currentGridConfig.columns}, 1fr);` : '',
-        currentGridConfig.rows ? `--grid-row-height: calc((100vh - 3.5rem - 1.5rem - ${(currentGridConfig.rows - 1) * 0.75}rem) / ${currentGridConfig.rows}); grid-template-rows: repeat(${currentGridConfig.rows}, var(--grid-row-height)); grid-auto-rows: var(--grid-row-height);` : '',
+        // Header is 3.5rem; no workspace padding or inter-cell gaps in dense grid.
+        currentGridConfig.rows ? `--grid-row-height: calc((100vh - 3.5rem) / ${currentGridConfig.rows}); grid-template-rows: repeat(${currentGridConfig.rows}, var(--grid-row-height)); grid-auto-rows: var(--grid-row-height);` : '',
       ].filter(Boolean).join(' ') : ''}
     >
       {#each allTerminals as t (t.id)}
@@ -1921,6 +1922,7 @@
                 projectId={t.projectId}
                 savedCommands={t.savedCommands}
                 pinned={t.pinned}
+                dense={!!gridViewProjectId && isVisible}
                 onAddToGroup={() => handleAddToGroupPrompt(t.id)}
                 onTogglePin={() => toggleTerminalPinned(t.connId, t.projectId, t.id)}
                 onResolveError={(msg) => { void showAlert(msg); }}
@@ -2110,11 +2112,16 @@
     inset: 0.75rem;
   }
 
+  /* Dense grid: zero gap/padding; cells share single borders (top/left on
+     workspace, right/bottom on each terminal chrome). */
   :global(#workspace.grid-mode) {
     display: grid !important;
     grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
     grid-auto-rows: minmax(0, 1fr);
-    gap: 0.75rem;
+    gap: 0;
+    padding: 0 !important;
+    border-top: 1px solid rgb(51 65 85);
+    border-left: 1px solid rgb(51 65 85);
   }
 
   :global(.terminal-visible.terminal-grid) {
