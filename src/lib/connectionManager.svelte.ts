@@ -329,3 +329,14 @@ export function closeConnection(terminalId: string) {
     connections.delete(terminalId);
   }
 }
+
+/** Tear down every live WebSocket (e.g. when switching profiles). */
+export function closeAllConnections() {
+  for (const terminalId of [...connections.keys()]) {
+    closeConnection(terminalId);
+  }
+  // Clear status map in place so reactive subscribers update
+  for (const key of Object.keys(connectionStatuses)) {
+    delete connectionStatuses[key];
+  }
+}

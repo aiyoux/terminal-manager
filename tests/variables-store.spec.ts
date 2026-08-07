@@ -7,6 +7,10 @@ test.describe('Variables store', () => {
 	test.beforeEach(async ({ page }) => {
 		await page.goto('/');
 		await expect(page.locator('body')).toBeVisible();
+		await page.evaluate(async () => {
+			const stores = await import('/src/lib/stores.svelte.ts');
+			await stores.whenLoaded();
+		});
 	});
 
 	async function seedHierarchy(page: import('@playwright/test').Page) {

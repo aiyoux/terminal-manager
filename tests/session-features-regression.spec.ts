@@ -21,6 +21,11 @@ test.describe('Session features regression', () => {
     });
     await page.reload();
     await expect(page.locator('body')).toBeVisible();
+    // Profiles load async from IndexedDB — wait so store mutations are not wiped.
+    await page.evaluate(async () => {
+      const stores = await import('/src/lib/stores.svelte.ts');
+      await stores.whenLoaded();
+    });
   });
 
   test('store: addSavedCommand supports isOnConnect and updateSavedCommand persists flags', async ({ page }) => {

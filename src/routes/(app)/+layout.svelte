@@ -4,7 +4,7 @@
   import Terminal from '$lib/components/Terminal.svelte';
   import VariablesEditor from '$lib/components/VariablesEditor.svelte';
   import TextReplaceModal from '$lib/components/TextReplaceModal.svelte';
-  import { closeConnection, sendInput, isConnected, reconnectConnection, connectionStatuses } from '$lib/connectionManager.svelte';
+  import { closeConnection, closeAllConnections, sendInput, isConnected, reconnectConnection, connectionStatuses } from '$lib/connectionManager.svelte';
 
   let { children } = $props();
   import {
@@ -13,6 +13,17 @@
     getActiveTerminalId,
     setActiveTerminalId,
     addConnection,
+    getProfiles,
+    getActiveProfileId,
+    getActiveProfileName,
+    getPortConfig,
+    getProfileEpoch,
+    updatePortConfig,
+    switchProfile,
+    createProfile,
+    renameProfile,
+    deleteProfile,
+    defaultWsUrlFromPortConfig,
     removeConnection,
     toggleConnectionCollapse,
     addProject,
@@ -91,6 +102,12 @@
   let terminalGroups = $derived(getTerminalGroups());
   let activeTerminalId = $derived(getActiveTerminalId());
   let activeWsUrl = $derived(getWsUrlForTerminal(activeTerminalId));
+  let profiles = $derived(getProfiles());
+  let activeProfileId = $derived(getActiveProfileId());
+  let activeProfileName = $derived(getActiveProfileName());
+  let portConfig = $derived(getPortConfig());
+  let profileEpoch = $derived(getProfileEpoch());
+  let profileMenuOpen = $state(false);
 
   type SidebarTab = 'connections' | 'groups' | 'pinned';
 
@@ -978,10 +995,83 @@
   }
 
   async function handleAddConnection() {
-    const wsUrl = await showPrompt('WebSocket URL (e.g., ws://localhost:7681):', 'ws://localhost:7681');
+    const defaultUrl = defaultWsUrlFromPortConfig(portConfig);
+    const wsUrl = await showPrompt('WebSocket URL (e.g., ws://localhost:7681):', defaultUrl);
     if (!wsUrl) return;
-    const name = await showPrompt('Connection name:', 'Local Machine') || 'Unnamed';
+    const name = (await showPrompt('Connection name:', 'Local Machine')) || 'Unnamed';
     addConnection(name, wsUrl);
+  }
+
+  async function handleSwitchProfile(id: string) {
+    profileMenuOpen = false;
+    if (id === activeProfileId) return;
+    closeAllConnections();
+    mountedTerminalIds = new Set();
+    gridViewConnId = '';
+    gridViewProjectId = '';
+    // Reset per-tab workspace memory for this UI session
+    tabWorkspace = {
+      connections: { activeTerminalId: '', gridViewConnId: '', gridViewProjectId: '' },
+      groups: { activeTerminalId: '', gridViewConnId: '', gridViewProjectId: '' },
+      pinned: { activeTerminalId: '', gridViewConnId: '__pinned__', gridViewProjectId: '__pinned__' },
+    };
+    prevSidebarTab = null;
+    await switchProfile(id);
+  }
+
+  async function handleCreateProfile() {
+    profileMenuOpen = false;
+    const name = await showPrompt('New profile name:', 'Cloud');
+    if (!name) return;
+    const copy = await showPrompt('Copy current profile data? (yes/no):', 'no');
+    const meta = createProfile(name, /^y(es)?$/i.test((copy || '').trim()));
+    await handleSwitchProfile(meta.id);
+  }
+
+  async function handleRenameProfile() {
+    profileMenuOpen = false;
+    const name = await showPrompt('Rename profile:', activeProfileName);
+    if (!name) return;
+    renameProfile(activeProfileId, name);
+  }
+
+  async function handleDeleteProfile() {
+    profileMenuOpen = false;
+    if (profiles.length <= 1) {
+      await showAlert('You need at least one profile.');
+      return;
+    }
+    if (!(await confirmDelete(`Delete profile “${activeProfileName}”? All of its connections and data will be removed.`, 'Delete profile'))) return;
+    closeAllConnections();
+    mountedTerminalIds = new Set();
+    gridViewConnId = '';
+    gridViewProjectId = '';
+    tabWorkspace = {
+      connections: { activeTerminalId: '', gridViewConnId: '', gridViewProjectId: '' },
+      groups: { activeTerminalId: '', gridViewConnId: '', gridViewProjectId: '' },
+      pinned: { activeTerminalId: '', gridViewConnId: '__pinned__', gridViewProjectId: '__pinned__' },
+    };
+    prevSidebarTab = null;
+    await deleteProfile(activeProfileId);
+  }
+
+  async function handleEditPortConfig() {
+    profileMenuOpen = false;
+    const host = await showPrompt('Default WebSocket host:', portConfig.defaultHost);
+    if (host == null || host === '') return;
+    const portStr = await showPrompt('Default WebSocket port:', String(portConfig.defaultPort));
+    if (portStr == null || portStr === '') return;
+    const port = parseInt(portStr, 10);
+    if (!Number.isFinite(port) || port < 1 || port > 65535) {
+      await showAlert('Port must be a number from 1 to 65535.');
+      return;
+    }
+    const tls = await showPrompt('Use TLS (wss)? (yes/no):', portConfig.useTls ? 'yes' : 'no');
+    updatePortConfig({
+      defaultHost: host,
+      defaultPort: port,
+      useTls: /^y(es)?$/i.test((tls || '').trim()),
+    });
   }
 
   async function handleAddGroup() {
@@ -1262,13 +1352,61 @@
         {/if}
       </button>
       <h1 class="text-lg font-bold tracking-tight bg-gradient-to-r from-white to-slate-400 bg-clip-text text-transparent">Terminal Dashboard</h1>
+      <!-- Profile switcher -->
+      <div class="relative ml-1">
+        <button
+          type="button"
+          onclick={() => { profileMenuOpen = !profileMenuOpen; }}
+          class="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] font-semibold tracking-wide border border-white/10 bg-white/5 text-slate-300 hover:text-white hover:border-sky-500/40 hover:bg-sky-500/10 transition-all"
+          data-tooltip="Switch saved profile (port + full workspace data)"
+          data-tooltip-pos="bottom"
+          aria-expanded={profileMenuOpen}
+          aria-haspopup="menu"
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+          <span class="max-w-[8rem] truncate">{activeProfileName}</span>
+          <span class="text-slate-500 font-mono text-[10px]">:{portConfig.defaultPort}</span>
+          <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="text-slate-500"><polyline points="6 9 12 15 18 9"/></svg>
+        </button>
+        {#if profileMenuOpen}
+          <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+          <div class="fixed inset-0 z-40" onclick={() => { profileMenuOpen = false; }}></div>
+          <div
+            class="absolute left-0 top-full mt-1.5 z-50 min-w-[14rem] rounded-xl border border-white/10 bg-slate-900 shadow-2xl shadow-black/50 py-1"
+            role="menu"
+          >
+            <div class="px-3 py-1.5 text-[9px] font-bold uppercase tracking-widest text-slate-600">Profiles</div>
+            {#each profiles as p (p.id)}
+              <button
+                type="button"
+                role="menuitem"
+                class="w-full text-left px-3 py-2 text-xs flex items-center justify-between gap-2 hover:bg-white/5 transition-colors {p.id === activeProfileId ? 'text-sky-300' : 'text-slate-300'}"
+                onclick={() => handleSwitchProfile(p.id)}
+              >
+                <span class="truncate font-medium">{p.name}</span>
+                {#if p.id === activeProfileId}
+                  <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="text-sky-400 shrink-0"><polyline points="20 6 9 17 4 12"/></svg>
+                {/if}
+              </button>
+            {/each}
+            <div class="my-1 border-t border-white/5"></div>
+            <button type="button" role="menuitem" class="w-full text-left px-3 py-2 text-xs text-slate-400 hover:text-white hover:bg-white/5" onclick={handleCreateProfile}>New profile…</button>
+            <button type="button" role="menuitem" class="w-full text-left px-3 py-2 text-xs text-slate-400 hover:text-white hover:bg-white/5" onclick={handleRenameProfile}>Rename…</button>
+            <button type="button" role="menuitem" class="w-full text-left px-3 py-2 text-xs text-slate-400 hover:text-white hover:bg-white/5" onclick={handleEditPortConfig}>Port config…</button>
+            <button type="button" role="menuitem" class="w-full text-left px-3 py-2 text-xs text-rose-400/90 hover:text-rose-300 hover:bg-rose-500/10" onclick={handleDeleteProfile}>Delete profile…</button>
+            <div class="px-3 py-2 text-[10px] text-slate-600 border-t border-white/5 mt-1">
+              Default URL: <span class="font-mono text-slate-500">{defaultWsUrlFromPortConfig(portConfig)}</span>
+            </div>
+          </div>
+        {/if}
+      </div>
     </div>
 
     <div class="flex items-center gap-2">
       <div class="flex items-center gap-1.5 mr-2">
         <button
           onclick={handleExport}
-          data-tooltip="Export dashboard configuration & connection settings to JSON"
+          data-tooltip="Export active profile configuration to JSON"
           data-tooltip-pos="bottom"
           class="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] font-semibold tracking-wide text-slate-400 hover:text-sky-400 hover:bg-sky-500/10 transition-all active:scale-95 group"
         >
@@ -1277,7 +1415,7 @@
         </button>
         <button
           onclick={() => fileInput.click()}
-          data-tooltip="Import dashboard settings & connections from JSON backup file"
+          data-tooltip="Import into the active profile from a JSON backup file"
           data-tooltip-pos="bottom"
           class="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] font-semibold tracking-wide text-slate-400 hover:text-emerald-400 hover:bg-emerald-500/10 transition-all active:scale-95 group"
         >

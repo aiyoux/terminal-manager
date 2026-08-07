@@ -1,7 +1,16 @@
 // Hierarchical state store: Connection → Project → Terminal
-// Persisted to IndexedDB
+// Persisted to IndexedDB, isolated per saved profile.
 
-import { loadConnections, saveConnections, loadTerminalGroups, saveTerminalGroups, loadGridSettings, saveGridSettings } from './db';
+import {
+  loadLegacyWorkspace,
+  loadProfilesIndex,
+  saveProfilesIndex,
+  loadProfileData,
+  saveProfileData,
+  deleteProfileData,
+  type ProfileMetaRecord,
+  type ProfilesIndexRecord,
+} from './db';
 import {
   type NodeVariables,
   type ResolveResult,
@@ -16,6 +25,49 @@ import {
 import { applyLiteralReplace, countLiteralOccurrences } from './commandTextReplace';
 
 export type { NodeVariables, ResolveResult };
+
+/** Per-profile port / connection defaults (e.g. local vs cloud tunnel port). */
+export interface ProfilePortConfig {
+  /** Host for default WebSocket URL (default localhost). */
+  defaultHost: string;
+  /** Port for default WebSocket URL (e.g. 7681 for local ttyd, 7682 for tunnel). */
+  defaultPort: number;
+  /** Prefer wss:// when building the default URL. */
+  useTls: boolean;
+}
+
+export interface ProfileMeta {
+  id: string;
+  name: string;
+  updatedAt: number;
+}
+
+export interface ProfileWorkspace {
+  connections: Connection[];
+  terminalGroups: TerminalGroup[];
+  gridSettings: GridSettings;
+  portConfig: ProfilePortConfig;
+}
+
+export function defaultPortConfig(): ProfilePortConfig {
+  return { defaultHost: 'localhost', defaultPort: 7681, useTls: false };
+}
+
+export function defaultWsUrlFromPortConfig(cfg: ProfilePortConfig): string {
+  const host = (cfg.defaultHost || 'localhost').trim() || 'localhost';
+  const port = Math.max(1, Math.min(65535, cfg.defaultPort || 7681));
+  const scheme = cfg.useTls ? 'wss' : 'ws';
+  return `${scheme}://${host}:${port}`;
+}
+
+function emptyWorkspace(): ProfileWorkspace {
+  return {
+    connections: [],
+    terminalGroups: [],
+    gridSettings: { columns: 0, rows: 0 },
+    portConfig: defaultPortConfig(),
+  };
+}
 
 export interface SavedCommand {
   id: string;
@@ -89,8 +141,19 @@ function uid(): string {
 let connections = $state<Connection[]>([]);
 let terminalGroups = $state<TerminalGroup[]>([]);
 let gridSettings = $state<GridSettings>({ columns: 0, rows: 0 });
+let portConfig = $state<ProfilePortConfig>(defaultPortConfig());
 let activeTerminalId = $state<string>('');
 let loaded = $state(false);
+let resolveLoaded!: () => void;
+const loadedPromise = new Promise<void>((r) => {
+  resolveLoaded = r;
+});
+
+// Profiles
+let profileList = $state<ProfileMeta[]>([]);
+let activeProfileId = $state<string>('');
+/** Bumped when the active profile changes so the UI can clear mounted terminals. */
+let profileEpoch = $state(0);
 
 // Migrate old data: convert startupCommand string to savedCommands array
 function migrateTerminal(t: any): TerminalTab {
@@ -180,56 +243,239 @@ function ensureUniqueCommandIds(conns: Connection[]): boolean {
   return changed;
 }
 
-// Load from IndexedDB on init
-if (typeof window !== 'undefined') {
-  Promise.all([
-    loadConnections<Connection[]>(),
-    loadTerminalGroups<TerminalGroup[]>(),
-    loadGridSettings<GridSettings>()
-  ]).then(([connData, groupData, gridData]) => {
-    const conns = connData ?? [];
-    const groups = groupData ?? [];
-    if (connData || groupData) {
-      normalizeState(conns, groups);
-      const reIded = ensureUniqueCommandIds(conns);
-      connections = conns;
-      terminalGroups = groups;
-      if (reIded) {
-        saveConnections($state.snapshot(connections));
-      }
-    }
-    if (gridData) {
-      gridSettings = gridData;
-    }
-    loaded = true;
-  });
+function snapshotWorkspace(): ProfileWorkspace {
+  return {
+    connections: $state.snapshot(connections) as Connection[],
+    terminalGroups: $state.snapshot(terminalGroups) as TerminalGroup[],
+    gridSettings: $state.snapshot(gridSettings) as GridSettings,
+    portConfig: $state.snapshot(portConfig) as ProfilePortConfig,
+  };
+}
+
+function applyWorkspace(ws: ProfileWorkspace) {
+  const conns = ws.connections ?? [];
+  const groups = ws.terminalGroups ?? [];
+  normalizeState(conns, groups);
+  ensureUniqueCommandIds(conns);
+  connections = conns;
+  terminalGroups = groups;
+  gridSettings = ws.gridSettings ?? { columns: 0, rows: 0 };
+  portConfig = {
+    ...defaultPortConfig(),
+    ...(ws.portConfig ?? {}),
+  };
+  activeTerminalId = '';
+}
+
+function saveIndex() {
+  const index: ProfilesIndexRecord = {
+    activeProfileId,
+    profiles: $state.snapshot(profileList) as ProfileMetaRecord[],
+  };
+  void saveProfilesIndex(index);
+}
+
+function persistActiveProfile() {
+  if (!activeProfileId) return;
+  const data = snapshotWorkspace();
+  void saveProfileData(activeProfileId, data);
+  const meta = profileList.find((p) => p.id === activeProfileId);
+  if (meta) {
+    meta.updatedAt = Date.now();
+    profileList = [...profileList];
+    saveIndex();
+  }
 }
 
 function save() {
-  saveConnections($state.snapshot(connections));
+  persistActiveProfile();
 }
 
 function saveGroups() {
-  saveTerminalGroups($state.snapshot(terminalGroups));
+  persistActiveProfile();
+}
+
+// Load profiles (or migrate legacy single-workspace) on init
+if (typeof window !== 'undefined') {
+  (async () => {
+    try {
+      let index = await loadProfilesIndex();
+      if (!index || !index.profiles?.length) {
+        // Migrate v1 flat keys → first profile, or create empty Default
+        const legacy = await loadLegacyWorkspace();
+        const id = uid();
+        const meta: ProfileMeta = { id, name: 'Default', updatedAt: Date.now() };
+        const ws: ProfileWorkspace = emptyWorkspace();
+        if (legacy) {
+          if (Array.isArray(legacy.connections)) ws.connections = legacy.connections as Connection[];
+          if (Array.isArray(legacy.terminalGroups))
+            ws.terminalGroups = legacy.terminalGroups as TerminalGroup[];
+          if (legacy.gridSettings && typeof legacy.gridSettings === 'object') {
+            ws.gridSettings = legacy.gridSettings as GridSettings;
+          }
+        }
+        normalizeState(ws.connections, ws.terminalGroups);
+        ensureUniqueCommandIds(ws.connections);
+        await saveProfileData(id, ws);
+        index = { activeProfileId: id, profiles: [meta] };
+        await saveProfilesIndex(index);
+      }
+
+      profileList = index.profiles.map((p) => ({
+        id: p.id,
+        name: p.name,
+        updatedAt: p.updatedAt ?? Date.now(),
+      }));
+      activeProfileId = index.activeProfileId || profileList[0].id;
+
+      let data = await loadProfileData<ProfileWorkspace>(activeProfileId);
+      if (!data) {
+        data = emptyWorkspace();
+        await saveProfileData(activeProfileId, data);
+      }
+      applyWorkspace(data);
+    } catch (e) {
+      console.error('Failed to load profiles', e);
+      const id = uid();
+      profileList = [{ id, name: 'Default', updatedAt: Date.now() }];
+      activeProfileId = id;
+      applyWorkspace(emptyWorkspace());
+      saveIndex();
+      persistActiveProfile();
+    }
+    loaded = true;
+    resolveLoaded();
+  })();
+}
+
+/** Wait until profiles/workspace have been loaded from IndexedDB. */
+export function whenLoaded(): Promise<void> {
+  if (loaded) return Promise.resolve();
+  return loadedPromise;
+}
+
+// --- Profile API ---
+
+export function getProfiles(): ProfileMeta[] {
+  return profileList;
+}
+
+export function getActiveProfileId(): string {
+  return activeProfileId;
+}
+
+export function getActiveProfileName(): string {
+  return profileList.find((p) => p.id === activeProfileId)?.name ?? 'Profile';
+}
+
+export function getPortConfig(): ProfilePortConfig {
+  return portConfig;
+}
+
+export function getProfileEpoch(): number {
+  return profileEpoch;
+}
+
+export function updatePortConfig(patch: Partial<ProfilePortConfig>) {
+  portConfig = {
+    ...portConfig,
+    ...patch,
+    defaultPort: Math.max(1, Math.min(65535, patch.defaultPort ?? portConfig.defaultPort)),
+    defaultHost: (patch.defaultHost ?? portConfig.defaultHost).trim() || 'localhost',
+  };
+  persistActiveProfile();
+}
+
+export async function switchProfile(profileId: string): Promise<boolean> {
+  if (!profileId || profileId === activeProfileId) return false;
+  const meta = profileList.find((p) => p.id === profileId);
+  if (!meta) return false;
+
+  // Save current workspace first
+  persistActiveProfile();
+
+  const data = (await loadProfileData<ProfileWorkspace>(profileId)) ?? emptyWorkspace();
+  activeProfileId = profileId;
+  applyWorkspace(data);
+  saveIndex();
+  profileEpoch += 1;
+  return true;
+}
+
+export function createProfile(name: string, copyFromActive = false): ProfileMeta {
+  const id = uid();
+  const meta: ProfileMeta = {
+    id,
+    name: name.trim() || 'New Profile',
+    updatedAt: Date.now(),
+  };
+  const ws = copyFromActive ? snapshotWorkspace() : emptyWorkspace();
+  // Fresh copy: deep snapshot already; if not copy, empty
+  if (copyFromActive) {
+    // Re-id not required; user may want same structure. Keep IDs for simplicity.
+  }
+  profileList = [...profileList, meta];
+  void saveProfileData(id, ws);
+  saveIndex();
+  return meta;
+}
+
+export function renameProfile(profileId: string, name: string): boolean {
+  const meta = profileList.find((p) => p.id === profileId);
+  if (!meta) return false;
+  meta.name = name.trim() || meta.name;
+  meta.updatedAt = Date.now();
+  profileList = [...profileList];
+  saveIndex();
+  return true;
+}
+
+export async function deleteProfile(profileId: string): Promise<boolean> {
+  if (profileList.length <= 1) return false; // keep at least one
+  const idx = profileList.findIndex((p) => p.id === profileId);
+  if (idx < 0) return false;
+
+  profileList = profileList.filter((p) => p.id !== profileId);
+  await deleteProfileData(profileId);
+
+  if (activeProfileId === profileId) {
+    const next = profileList[0];
+    activeProfileId = next.id;
+    const data = (await loadProfileData<ProfileWorkspace>(next.id)) ?? emptyWorkspace();
+    applyWorkspace(data);
+    profileEpoch += 1;
+  }
+  saveIndex();
+  return true;
 }
 
 // --- Persistence & Migration ---
 
 export function exportState(): string {
-  return JSON.stringify({
-    connections: $state.snapshot(connections),
-    terminalGroups: $state.snapshot(terminalGroups),
-    gridSettings: $state.snapshot(gridSettings)
-  }, null, 2);
+  return JSON.stringify(
+    {
+      version: 2,
+      profile: {
+        id: activeProfileId,
+        name: getActiveProfileName(),
+        portConfig: $state.snapshot(portConfig),
+      },
+      connections: $state.snapshot(connections),
+      terminalGroups: $state.snapshot(terminalGroups),
+      gridSettings: $state.snapshot(gridSettings),
+    },
+    null,
+    2
+  );
 }
 
 export function importState(json: string): boolean {
   try {
     const data = JSON.parse(json);
-    
+
     // Check if new format or old format
     let conns = Array.isArray(data) ? data : data.connections;
-    let groups = Array.isArray(data) ? [] : (data.terminalGroups || []);
+    let groups = Array.isArray(data) ? [] : data.terminalGroups || [];
 
     if (!Array.isArray(conns)) return false;
 
@@ -256,10 +502,14 @@ export function importState(json: string): boolean {
     terminalGroups = groups;
     if (data.gridSettings) {
       gridSettings = data.gridSettings;
-      saveGridSettings($state.snapshot(gridSettings));
     }
-    save();
-    saveGroups();
+    if (data.portConfig || data.profile?.portConfig) {
+      portConfig = {
+        ...defaultPortConfig(),
+        ...(data.portConfig ?? data.profile?.portConfig ?? {}),
+      };
+    }
+    persistActiveProfile();
     return true;
   } catch (e) {
     console.error('Failed to import state:', e);
@@ -831,7 +1081,7 @@ export function getGridSettings(): GridSettings {
 
 export function setGridLayout(columns: number, rows: number) {
   gridSettings = { columns, rows };
-  saveGridSettings($state.snapshot(gridSettings));
+  persistActiveProfile();
 }
 
 export function updateTerminalFontSize(connId: string, projectId: string, terminalId: string, fontSize: number) {
